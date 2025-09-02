@@ -112,46 +112,74 @@ class DeauthFloodDetector(SecurityThreatAnalyzer):
     def _collect_deauth_stats(self, packets: List[Packet]) -> None:
         """Collect statistics from deauth packets."""
         for i, packet in enumerate(packets):
-            if not packet.haslayer(Dot11) or not packet.haslayer(Dot11Deauth):
-                continue
+            try:
+                if not packet.haslayer(Dot11) or not packet.haslayer(Dot11Deauth):
+                    continue
+                    
+                dot11 = packet[Dot11]
+                deauth = packet[Dot11Deauth]
                 
-            dot11 = packet[Dot11]
-            deauth = packet[Dot11Deauth]
-            
-            # Basic addressing
-            src_mac = self._normalize_mac(dot11.addr2)
-            dst_mac = self._normalize_mac(dot11.addr1) 
-            bssid = self._normalize_mac(dot11.addr3)
-            
-            # Reason code
-            reason = getattr(deauth, 'reason', 0)
-            
-            # Timestamp
-            timestamp = getattr(packet, 'time', 0.0)
-            
-            # Store packet info
-            packet_info = {
-                'packet_index': i,
-                'timestamp': timestamp,
-                'src_mac': src_mac,
-                'dst_mac': dst_mac,
-                'bssid': bssid,
-                'reason': reason,
-                'is_broadcast': dst_mac == 'ff:ff:ff:ff:ff:ff'
-            }
-            
-            self.deauth_packets.append(packet_info)
-            self.deauth_timeline.append(timestamp)
-            
-            # Update counters
-            if src_mac:
-                self.source_stats[src_mac] += 1
-            if dst_mac:
-                self.target_stats[dst_mac] += 1
-            if bssid:
-                self.bssid_stats[bssid] += 1
-            if reason:
-                self.reason_stats[reason] += 1
+                # Basic addressing - safely extract MAC addresses
+                src_mac = self._normalize_mac(str(dot11.addr2)) if hasattr(dot11, 'addr2') and dot11.addr2 else None
+                dst_mac = self._normalize_mac(str(dot11.addr1)) if hasattr(dot11, 'addr1') and dot11.addr1 else None
+                bssid = self._normalize_mac(str(dot11.addr3)) if hasattr(dot11, 'addr3') and dot11.addr3 else None
+                
+                # Reason code - safely extract
+                reason = 0
+                if hasattr(deauth, 'reason'):
+                    try:
+                        reason_val = deauth.reason
+                        if hasattr(reason_val, '__int__'):
+                            reason = int(reason_val)
+                        elif hasattr(reason_val, 'val'):
+                            reason = int(reason_val.val)
+                        else:
+                            reason = int(reason_val)
+                    except (ValueError, TypeError, AttributeError):
+                        reason = 0
+                
+                # Timestamp - safely extract
+                timestamp = 0.0
+                if hasattr(packet, 'time'):
+                    try:
+                        time_val = packet.time
+                        if hasattr(time_val, '__float__'):
+                            timestamp = float(time_val)
+                        elif hasattr(time_val, 'val'):
+                            timestamp = float(time_val.val)
+                        else:
+                            timestamp = float(time_val)
+                    except (ValueError, TypeError, AttributeError):
+                        timestamp = 0.0
+                
+                # Store packet info
+                packet_info = {
+                    'packet_index': i,
+                    'timestamp': timestamp,
+                    'src_mac': src_mac,
+                    'dst_mac': dst_mac,
+                    'bssid': bssid,
+                    'reason': reason,
+                    'is_broadcast': dst_mac == 'ff:ff:ff:ff:ff:ff' if dst_mac else False
+                }
+                
+                self.deauth_packets.append(packet_info)
+                if timestamp > 0:
+                    self.deauth_timeline.append(timestamp)
+                
+                # Update counters
+                if src_mac:
+                    self.source_stats[src_mac] += 1
+                if dst_mac:
+                    self.target_stats[dst_mac] += 1
+                if bssid:
+                    self.bssid_stats[bssid] += 1
+                if reason:
+                    self.reason_stats[reason] += 1
+                    
+            except Exception as e:
+                self.logger.debug(f"Error processing deauth packet {i}: {e}")
+                continue
                 
     def _detect_flood_attacks(self, context: AnalysisContext) -> List[Finding]:
         """Detect high-rate deauth flooding."""

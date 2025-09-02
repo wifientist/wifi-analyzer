@@ -72,8 +72,14 @@ class WirelessPCAPAnalyzer:
         try:
             # Import and register core analyzers
             from .analyzers.security.deauth_detector import DeauthFloodDetector
+            from .analyzers.core.signal_analyzer import RFPHYSignalAnalyzer
+            from .analyzers.core.capture_validator import CaptureQualityAnalyzer
+            from .analyzers.core.beacon_analyzer import BeaconAnalyzer
             
+            self.registry.register(CaptureQualityAnalyzer())
             self.registry.register(DeauthFloodDetector())
+            self.registry.register(RFPHYSignalAnalyzer())
+            self.registry.register(BeaconAnalyzer())
             
             self.logger.info(f"Registered {len(self.registry.get_all_analyzers())} analyzers")
             
@@ -325,9 +331,23 @@ class WirelessPCAPAnalyzer:
                 config=self.config
             )
             
-        # Extract timing info
-        timestamps = [getattr(p, 'time', 0) for p in packets if hasattr(p, 'time')]
-        
+        # Extract timing info safely
+        timestamps = []
+        for packet in packets:
+            try:
+                if hasattr(packet, 'time'):
+                    time_val = packet.time
+                    # Handle Scapy's EDecimal objects
+                    if hasattr(time_val, '__float__'):
+                        timestamps.append(float(time_val))
+                    elif hasattr(time_val, 'val'):
+                        timestamps.append(float(time_val.val))
+                    else:
+                        timestamps.append(float(time_val))
+            except (ValueError, TypeError, AttributeError) as e:
+                self.logger.debug(f"Error extracting timestamp: {e}")
+                continue
+                
         if timestamps:
             start_time = min(timestamps)
             end_time = max(timestamps)
@@ -344,9 +364,12 @@ class WirelessPCAPAnalyzer:
             config=self.config
         )
         
-        # Pre-populate network entities
-        self._extract_network_entities(packets, context)
-        
+        # Pre-populate network entities safely
+        try:
+            self._extract_network_entities(packets, context)
+        except Exception as e:
+            self.logger.warning(f"Error extracting network entities: {e}")
+            
         return context
         
     def _extract_network_entities(self, packets: List[Packet], context: AnalysisContext) -> None:

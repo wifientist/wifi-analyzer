@@ -64,6 +64,8 @@ def cli(ctx, log_level: str, config_file: Optional[str]):
 @click.argument('pcap_file', type=click.Path(exists=True))
 @click.option('--output', '-o', type=click.Path(), 
               help='Output file path (default: auto-generated)')
+@click.option('--output-dir', type=click.Path(),
+              help='Output directory (default: ./results)')
 @click.option('--format', '-f', default='json',
               type=click.Choice(['json', 'html', 'text']),
               help='Output format')
@@ -76,8 +78,8 @@ def cli(ctx, log_level: str, config_file: Optional[str]):
 @click.option('--quiet', '-q', is_flag=True,
               help='Suppress progress output')
 @click.pass_context
-def analyze(ctx, pcap_file: str, output: Optional[str], format: str,
-           max_packets: Optional[int], analyzers: tuple, 
+def analyze(ctx, pcap_file: str, output: Optional[str], output_dir: Optional[str], 
+           format: str, max_packets: Optional[int], analyzers: tuple, 
            no_expert: bool, quiet: bool):
     """Analyze a wireless PCAP file."""
     
@@ -111,7 +113,27 @@ def analyze(ctx, pcap_file: str, output: Optional[str], format: str,
         if not output:
             pcap_path = Path(pcap_file)
             timestamp = results.analysis_timestamp.strftime("%Y%m%d_%H%M%S")
-            output = f"{pcap_path.stem}_analysis_{timestamp}.{format}"
+            
+            # Create shorter, more meaningful filename
+            pcap_stem = pcap_path.stem
+            if len(pcap_stem) > 20:
+                # For very long names (like hashes), use first 8 chars + last 4 chars
+                short_name = f"{pcap_stem[:8]}...{pcap_stem[-4:]}"
+            else:
+                short_name = pcap_stem
+                
+            # Set up output directory
+            if output_dir:
+                output_path = Path(output_dir)
+            else:
+                output_path = Path("results")
+                
+            # Create output directory if it doesn't exist
+            output_path.mkdir(parents=True, exist_ok=True)
+            
+            # Generate final output path
+            filename = f"analysis_{short_name}_{timestamp}.{format}"
+            output = str(output_path / filename)
             
         # Write output
         with open(output, 'w') as f:
