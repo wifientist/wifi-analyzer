@@ -1,0 +1,188 @@
+# Wireless PCAP Analyzer Configuration
+# ====================================
+
+# Analysis Configuration
+analysis:
+  # Default maximum packets to analyze (0 = no limit)
+  max_packets_default: 0
+  
+  # Enable expert agent analysis by default
+  expert_analysis: true
+  
+  # Confidence threshold for high-confidence findings
+  high_confidence_threshold: 0.8
+
+# Analyzer-specific configurations
+analyzers:
+  # Deauth Flood Detector
+  deauth_detector:
+    enabled: true
+    flood_rate_threshold: 5.0
+    critical_rate_threshold: 20.0
+    targeted_threshold: 10
+    suspicious_reason_threshold: 10
+    
+  # Beacon Analyzer
+  beacon_analyzer:
+    enabled: true
+    min_beacon_interval_ms: 50
+    max_beacon_interval_ms: 2000
+    max_jitter_threshold_ms: 50
+    
+  # Signal Strength Analyzer
+  signal_analyzer:
+    enabled: true
+    weak_signal_threshold: -70
+    very_weak_threshold: -80
+    
+  # EAPOL Analyzer
+  eapol_analyzer:
+    enabled: true
+    handshake_timeout_ms: 5000
+    max_handshake_retries: 3
+
+# Security thresholds
+security:
+  # Deauthentication attack detection
+  deauth_flood_rate: 5.0
+  deauth_critical_rate: 20.0
+  
+  # Evil twin detection
+  ssid_similarity_threshold: 0.9
+  beacon_interval_variance_threshold: 50
+  
+  # WPA/WPA2/WPA3 analysis
+  require_pmf_for_wpa3: true
+  warn_on_wpa2_only: false
+  flag_transition_mode_issues: true
+
+# Performance analysis
+performance:
+  # RSSI thresholds
+  good_rssi_threshold: -50
+  acceptable_rssi_threshold: -70
+  poor_rssi_threshold: -80
+  
+  # Channel utilization thresholds (percentage)
+  low_utilization: 30
+  medium_utilization: 60
+  high_utilization: 80
+  
+  # Retry rate thresholds (percentage)
+  normal_retry_rate: 10
+  high_retry_rate: 25
+  excessive_retry_rate: 50
+
+# Network behavior analysis
+network:
+  # Roaming analysis
+  roam_gap_threshold_ms: 1000
+  roam_failure_threshold_ms: 5000
+  
+  # Multicast analysis
+  multicast_rate_threshold_pps: 100
+  dhcp_timeout_threshold_s: 30
+  
+  # Client behavior
+  sticky_client_threshold_s: 300
+  probe_rate_threshold_pps: 10
+
+# Expert agent configuration
+expert:
+  # Enable different analysis domains
+  enable_security_assessment: true
+  enable_performance_optimization: true
+  enable_compliance_checking: true
+  enable_troubleshooting_guidance: true
+  
+  # Risk scoring weights
+  risk_weights:
+    critical_findings: 25
+    warning_findings: 10
+    error_findings: 15
+    security_issues: 30
+    performance_issues: 15
+
+# Output configuration
+output:
+  # Default output format
+  default_format: json
+  
+  # Include packet references in findings
+  include_packet_refs: true
+  
+  # Maximum packet references per finding
+  max_packet_refs: 10
+  
+  # Include network entity details
+  include_network_entities: true
+  
+  # Report formatting
+  json_indent: 2
+  include_debug_info: false
+
+# Logging configuration
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # Per-analyzer logging levels
+  analyzer_levels:
+    deauth_detector: INFO
+    beacon_analyzer: INFO
+    eapol_analyzer: DEBUG
+
+# Development and testing
+development:
+  # Enable performance profiling
+  enable_profiling: false
+  
+  # Enable debug packet dumps
+  debug_packet_dumps: false
+  
+  # Test data paths
+  test_pcap_dir: "tests/fixtures/sample_pcaps"
+  
+  # Validation settings
+  strict_validation: false
+  
+# Plugin configuration (for future extensibility)
+plugins:
+  # Custom analyzer paths
+  custom_analyzer_paths: []
+  
+  # External integrations
+  integrations:
+    elasticsearch:
+      enabled: false
+      host: "localhost"
+      port: 9200
+    
+    splunk:
+      enabled: false
+      host: "localhost"
+      port: 8089
+      
+  # Custom OUI database
+  custom_oui_database: "config/custom_oui.txt"
+
+# Enterprise-specific settings
+enterprise:
+  # Organization-specific thresholds
+  org_name: "Your Organization"
+  
+  # Compliance requirements
+  compliance_frameworks:
+    - "802.11w_required"
+    - "wpa3_transition"
+    - "enterprise_wpa2"
+    
+  # Custom security policies
+  security_policies:
+    min_rssi: -75
+    max_retry_rate: 20
+    required_cipher_suites: ["CCMP", "GCMP"]
+    
+  # Asset management integration
+  known_aps: "config/known_aps.json"
+  known_clients: "config/known_clients.json"
