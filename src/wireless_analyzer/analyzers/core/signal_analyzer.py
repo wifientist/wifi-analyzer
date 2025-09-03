@@ -19,6 +19,10 @@ from scapy.all import Packet
 from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11ProbeResp, Dot11ProbeReq, Dot11AssoReq, Dot11ReassoReq
 
 from ...core.base_analyzer import BaseAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -103,7 +107,7 @@ class RFPHYSignalAnalyzer(BaseAnalyzer):
         
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet has RF/PHY information worth analyzing."""
-        return packet.haslayer(Dot11)
+        return packet_has_layer(packet, Dot11)
         
     def analyze(self, packets: List[Packet], context: AnalysisContext) -> List[Finding]:
         """
@@ -143,10 +147,10 @@ class RFPHYSignalAnalyzer(BaseAnalyzer):
         """Collect RF/PHY metrics from packets."""
         for i, packet in enumerate(packets):
             try:
-                if not packet.haslayer(Dot11):
+                if not packet_has_layer(packet, Dot11):
                     continue
                     
-                dot11 = packet[Dot11]
+                dot11 = get_packet_layer(packet, "Dot11")
                 
                 # Extract basic addressing
                 src_mac = self._normalize_mac(str(dot11.addr2)) if hasattr(dot11, 'addr2') and dot11.addr2 else None
@@ -798,7 +802,7 @@ class RFPHYSignalAnalyzer(BaseAnalyzer):
         """Extract timestamp from packet."""
         if hasattr(packet, 'time'):
             try:
-                time_val = packet.time
+                time_val = get_timestamp(packet)
                 if hasattr(time_val, '__float__'):
                     return float(time_val)
                 elif hasattr(time_val, 'val'):

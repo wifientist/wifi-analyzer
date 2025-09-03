@@ -43,6 +43,10 @@ except ImportError:
         TLSCertificate = None
 
 from ...core.base_analyzer import BaseAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -323,11 +327,11 @@ class WPASecurityPostureAnalyzer(BaseAnalyzer):
 
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is relevant for security posture analysis."""
-        return (packet.haslayer(Dot11Beacon) or
-                packet.haslayer(Dot11AssoReq) or
-                packet.haslayer(Dot11AssoResp) or
-                packet.haslayer(EAP) or
-                packet.haslayer(TLS))
+        return (packet_has_layer(packet, Dot11Beacon) or
+                packet_has_layer(packet, Dot11AssoReq) or
+                packet_has_layer(packet, Dot11AssoResp) or
+                packet_has_layer(packet, EAP) or
+                packet_has_layer(packet, TLS))
         
     def get_display_filters(self) -> List[str]:
         """Get Wireshark display filters."""
@@ -447,9 +451,9 @@ class WPASecurityPostureAnalyzer(BaseAnalyzer):
         """Analyze security-related frames for detailed posture assessment."""
         for packet in packets:
             try:
-                if packet.haslayer(Dot11Beacon) or packet.haslayer(Dot11AssoResp):
+                if packet_has_layer(packet, Dot11Beacon) or packet_has_layer(packet, Dot11AssoResp):
                     self._analyze_rsn_ie(packet)
-                elif packet.haslayer(Dot11AssoReq):
+                elif packet_has_layer(packet, Dot11AssoReq):
                     self._analyze_client_capabilities(packet)
                     
             except Exception as e:
@@ -458,10 +462,10 @@ class WPASecurityPostureAnalyzer(BaseAnalyzer):
                 
     def _analyze_rsn_ie(self, packet: Packet) -> None:
         """Analyze RSN Information Element for detailed security configuration."""
-        if not packet.haslayer(Dot11):
+        if not packet_has_layer(packet, Dot11):
             return
             
-        dot11 = packet[Dot11]
+        dot11 = get_packet_layer(packet, "Dot11")
         bssid = dot11.addr3 if dot11.addr3 else dot11.addr2
         
         if bssid not in self.security_postures:
@@ -470,8 +474,8 @@ class WPASecurityPostureAnalyzer(BaseAnalyzer):
         posture = self.security_postures[bssid]
         
         # Parse RSN IE
-        if packet.haslayer(Dot11Elt):
-            current_ie = packet[Dot11Elt]
+        if packet_has_layer(packet, Dot11Elt):
+            current_ie = get_packet_layer(packet, "Dot11Elt")
             while current_ie:
                 if current_ie.ID == 48:  # RSN IE
                     self._parse_rsn_ie(current_ie, posture)
@@ -627,7 +631,7 @@ class WPASecurityPostureAnalyzer(BaseAnalyzer):
             
         for packet in packets:
             try:
-                if packet.haslayer(TLSCertificate):
+                if packet_has_layer(packet, TLSCertificate):
                     self._extract_certificate_info(packet)
             except Exception as e:
                 self.logger.debug(f"Error analyzing certificate: {e}")

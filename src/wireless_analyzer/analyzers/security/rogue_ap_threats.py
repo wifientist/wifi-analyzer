@@ -32,6 +32,10 @@ from scapy.layers.dot11 import (
 from scapy.layers.dot11 import RadioTap
 
 from ...core.base_analyzer import BaseAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -238,11 +242,11 @@ class RogueAPSecurityAnalyzer(BaseAnalyzer):
 
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is relevant for rogue AP/threat analysis."""
-        return (packet.haslayer(Dot11Beacon) or
-                packet.haslayer(Dot11Deauth) or
-                packet.haslayer(Dot11Disas) or
-                packet.haslayer(Dot11ProbeReq) or
-                packet.haslayer(Dot11ProbeResp))
+        return (packet_has_layer(packet, Dot11Beacon) or
+                packet_has_layer(packet, Dot11Deauth) or
+                packet_has_layer(packet, Dot11Disas) or
+                packet_has_layer(packet, Dot11ProbeReq) or
+                packet_has_layer(packet, Dot11ProbeResp))
         
     def get_display_filters(self) -> List[str]:
         """Get Wireshark display filters."""
@@ -329,9 +333,9 @@ class RogueAPSecurityAnalyzer(BaseAnalyzer):
         # Enhance fingerprints with packet analysis
         for packet in packets:
             try:
-                if packet.haslayer(Dot11Beacon):
+                if packet_has_layer(packet, Dot11Beacon):
                     self._update_beacon_fingerprint(packet)
-                elif packet.haslayer(Dot11ProbeResp):
+                elif packet_has_layer(packet, Dot11ProbeResp):
                     self._update_probe_response_fingerprint(packet)
                     
             except Exception as e:
@@ -340,8 +344,8 @@ class RogueAPSecurityAnalyzer(BaseAnalyzer):
                 
     def _update_beacon_fingerprint(self, packet: Packet) -> None:
         """Update AP fingerprint from beacon frame."""
-        dot11 = packet[Dot11]
-        beacon = packet[Dot11Beacon]
+        dot11 = get_packet_layer(packet, "Dot11")
+        beacon = get_packet_layer(packet, "Dot11Beacon")
         bssid = dot11.addr3
         
         if bssid not in self.ap_fingerprints:
@@ -350,7 +354,7 @@ class RogueAPSecurityAnalyzer(BaseAnalyzer):
         fingerprint = self.ap_fingerprints[bssid]
         
         # Update timing signature
-        timestamp = packet.time if hasattr(packet, 'time') else 0
+        timestamp = get_timestamp(packet) if hasattr(packet, 'time') else 0
         if hasattr(timestamp, '__float__'):
             timestamp = float(timestamp)
         elif hasattr(timestamp, 'val'):
@@ -381,8 +385,8 @@ class RogueAPSecurityAnalyzer(BaseAnalyzer):
                     
         # Parse Information Elements for signature
         ie_types = []
-        if packet.haslayer(Dot11Elt):
-            current_ie = packet[Dot11Elt]
+        if packet_has_layer(packet, Dot11Elt):
+            current_ie = get_packet_layer(packet, "Dot11Elt")
             while current_ie:
                 ie_types.append(current_ie.ID)
                 
@@ -400,14 +404,14 @@ class RogueAPSecurityAnalyzer(BaseAnalyzer):
         
     def _update_probe_response_fingerprint(self, packet: Packet) -> None:
         """Update AP fingerprint from probe response behavior."""
-        dot11 = packet[Dot11]
+        dot11 = get_packet_layer(packet, "Dot11")
         bssid = dot11.addr3
         
         if bssid not in self.ap_fingerprints:
             return
             
         # Track probe response timing
-        timestamp = packet.time if hasattr(packet, 'time') else 0
+        timestamp = get_timestamp(packet) if hasattr(packet, 'time') else 0
         if hasattr(timestamp, '__float__'):
             timestamp = float(timestamp)
         elif hasattr(timestamp, 'val'):
@@ -557,7 +561,7 @@ class RogueAPSecurityAnalyzer(BaseAnalyzer):
         
         for packet in packets:
             try:
-                timestamp = packet.time if hasattr(packet, 'time') else 0
+                timestamp = get_timestamp(packet) if hasattr(packet, 'time') else 0
                 if hasattr(timestamp, '__float__'):
                     timestamp = float(timestamp)
                 elif hasattr(timestamp, 'val'):
@@ -567,9 +571,9 @@ class RogueAPSecurityAnalyzer(BaseAnalyzer):
                     
                 packet_time = datetime.fromtimestamp(timestamp)
                 
-                if packet.haslayer(Dot11Deauth):
-                    deauth = packet[Dot11Deauth]
-                    dot11 = packet[Dot11]
+                if packet_has_layer(packet, Dot11Deauth):
+                    deauth = get_packet_layer(packet, "Dot11Deauth")
+                    dot11 = get_packet_layer(packet, "Dot11")
                     
                     event = {
                         'timestamp': packet_time,
@@ -584,9 +588,9 @@ class RogueAPSecurityAnalyzer(BaseAnalyzer):
                     source_key = f"{dot11.addr2}:{dot11.addr3}"
                     self.deauth_patterns[source_key].append(packet_time)
                     
-                elif packet.haslayer(Dot11Disas):
-                    disas = packet[Dot11Disas]
-                    dot11 = packet[Dot11]
+                elif packet_has_layer(packet, Dot11Disas):
+                    disas = get_packet_layer(packet, "Dot11Disas")
+                    dot11 = get_packet_layer(packet, "Dot11")
                     
                     event = {
                         'timestamp': packet_time,

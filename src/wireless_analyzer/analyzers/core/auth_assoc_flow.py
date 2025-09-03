@@ -29,6 +29,10 @@ from scapy.layers.dot11 import (
 from scapy.layers.eap import EAPOL
 
 from ...core.base_analyzer import BaseAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -259,14 +263,14 @@ class AuthAssocFlowAnalyzer(BaseAnalyzer):
 
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is relevant for auth/assoc analysis."""
-        return (packet.haslayer(Dot11Auth) or 
-                packet.haslayer(Dot11AssoReq) or 
-                packet.haslayer(Dot11AssoResp) or
-                packet.haslayer(Dot11ReassoReq) or
-                packet.haslayer(Dot11ReassoResp) or
-                packet.haslayer(Dot11Deauth) or
-                packet.haslayer(Dot11Disas) or
-                packet.haslayer(EAPOL))
+        return (packet_has_layer(packet, Dot11Auth) or 
+                packet_has_layer(packet, Dot11AssoReq) or 
+                packet_has_layer(packet, Dot11AssoResp) or
+                packet_has_layer(packet, Dot11ReassoReq) or
+                packet_has_layer(packet, Dot11ReassoResp) or
+                packet_has_layer(packet, Dot11Deauth) or
+                packet_has_layer(packet, Dot11Disas) or
+                packet_has_layer(packet, EAPOL))
         
     def get_display_filters(self) -> List[str]:
         """Get Wireshark display filters for auth/assoc analysis."""
@@ -356,13 +360,13 @@ class AuthAssocFlowAnalyzer(BaseAnalyzer):
     def _extract_connection_frame(self, packet: Packet) -> Optional[ConnectionFrame]:
         """Extract connection frame information."""
         try:
-            if not packet.haslayer(Dot11):
+            if not packet_has_layer(packet, Dot11):
                 return None
                 
-            dot11 = packet[Dot11]
+            dot11 = get_packet_layer(packet, "Dot11")
             
             # Get timestamp
-            timestamp = packet.time if hasattr(packet, 'time') else 0
+            timestamp = get_timestamp(packet) if hasattr(packet, 'time') else 0
             if hasattr(timestamp, '__float__'):
                 timestamp = float(timestamp)
             elif hasattr(timestamp, 'val'):
@@ -384,54 +388,54 @@ class AuthAssocFlowAnalyzer(BaseAnalyzer):
             capabilities = None
             supported_rates = []
             
-            if packet.haslayer(Dot11Auth):
-                auth = packet[Dot11Auth]
+            if packet_has_layer(packet, Dot11Auth):
+                auth = get_packet_layer(packet, "Dot11Auth")
                 if dot11.addr1 == bssid:  # Request (STA -> AP)
                     frame_type = FrameType.AUTH_REQ
                 else:  # Response (AP -> STA)
                     frame_type = FrameType.AUTH_RESP
                 status_code = auth.status if hasattr(auth, 'status') else None
                 
-            elif packet.haslayer(Dot11AssoReq):
+            elif packet_has_layer(packet, Dot11AssoReq):
                 frame_type = FrameType.ASSOC_REQ
-                assoc_req = packet[Dot11AssoReq]
+                assoc_req = get_packet_layer(packet, "Dot11AssoReq")
                 capabilities = assoc_req.cap if hasattr(assoc_req, 'cap') else None
                 supported_rates = self._extract_supported_rates(packet)
                 
-            elif packet.haslayer(Dot11AssoResp):
+            elif packet_has_layer(packet, Dot11AssoResp):
                 frame_type = FrameType.ASSOC_RESP
-                assoc_resp = packet[Dot11AssoResp]
+                assoc_resp = get_packet_layer(packet, "Dot11AssoResp")
                 status_code = assoc_resp.status if hasattr(assoc_resp, 'status') else None
                 capabilities = assoc_resp.cap if hasattr(assoc_resp, 'cap') else None
                 supported_rates = self._extract_supported_rates(packet)
                 
-            elif packet.haslayer(Dot11ReassoReq):
+            elif packet_has_layer(packet, Dot11ReassoReq):
                 frame_type = FrameType.REASSOC_REQ
-                reassoc_req = packet[Dot11ReassoReq]
+                reassoc_req = get_packet_layer(packet, "Dot11ReassoReq")
                 capabilities = reassoc_req.cap if hasattr(reassoc_req, 'cap') else None
                 supported_rates = self._extract_supported_rates(packet)
                 
-            elif packet.haslayer(Dot11ReassoResp):
+            elif packet_has_layer(packet, Dot11ReassoResp):
                 frame_type = FrameType.REASSOC_RESP
-                reassoc_resp = packet[Dot11ReassoResp]
+                reassoc_resp = get_packet_layer(packet, "Dot11ReassoResp")
                 status_code = reassoc_resp.status if hasattr(reassoc_resp, 'status') else None
                 capabilities = reassoc_resp.cap if hasattr(reassoc_resp, 'cap') else None
                 supported_rates = self._extract_supported_rates(packet)
                 
-            elif packet.haslayer(Dot11Deauth):
+            elif packet_has_layer(packet, Dot11Deauth):
                 frame_type = FrameType.DEAUTH
-                deauth = packet[Dot11Deauth]
+                deauth = get_packet_layer(packet, "Dot11Deauth")
                 reason_code = deauth.reason if hasattr(deauth, 'reason') else None
                 
-            elif packet.haslayer(Dot11Disas):
+            elif packet_has_layer(packet, Dot11Disas):
                 frame_type = FrameType.DISASSOC
-                disas = packet[Dot11Disas]
+                disas = get_packet_layer(packet, "Dot11Disas")
                 reason_code = disas.reason if hasattr(disas, 'reason') else None
                 
-            elif packet.haslayer(EAPOL):
-                eapol = packet[EAPOL]
+            elif packet_has_layer(packet, EAPOL):
+                eapol = get_packet_layer(packet, "EAPOL")
                 # Determine EAPOL message type (simplified)
-                if hasattr(eapol, 'type') and eapol.type == 3:  # Key frame
+                if hasattr(eapol, 'type') and get_packet_field(packet, "Dot11", "type") == 3:  # Key frame
                     # This is a simplified classification - more detailed analysis would examine key info
                     frame_type = FrameType.EAPOL_1  # Default to first message
                 else:
@@ -442,11 +446,11 @@ class AuthAssocFlowAnalyzer(BaseAnalyzer):
             
             # Extract RSSI if available
             rssi = None
-            if hasattr(packet, 'haslayer') and packet.haslayer('RadioTap'):
+            if hasattr(packet, 'haslayer') and packet_has_layer(packet, 'RadioTap'):
                 try:
                     from scapy.layers.dot11 import RadioTap
-                    if packet.haslayer(RadioTap):
-                        radiotap = packet[RadioTap]
+                    if packet_has_layer(packet, RadioTap):
+                        radiotap = get_packet_layer(packet, "RadioTap")
                         if hasattr(radiotap, 'dBm_AntSignal'):
                             rssi = radiotap.dBm_AntSignal
                 except:
@@ -475,8 +479,8 @@ class AuthAssocFlowAnalyzer(BaseAnalyzer):
         """Extract supported rates from packet IEs."""
         rates = []
         
-        if packet.haslayer(Dot11Elt):
-            current_ie = packet[Dot11Elt]
+        if packet_has_layer(packet, Dot11Elt):
+            current_ie = get_packet_layer(packet, "Dot11Elt")
             while current_ie:
                 if current_ie.ID == 1:  # Supported Rates
                     ie_data = bytes(current_ie.info) if current_ie.info else b''

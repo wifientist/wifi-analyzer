@@ -29,6 +29,10 @@ from scapy.layers.dot11 import (
 from scapy.layers.dot11 import RadioTap
 
 from ...core.base_analyzer import BaseAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -190,7 +194,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
 
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is a beacon frame."""
-        return packet.haslayer(Dot11Beacon)
+        return packet_has_layer(packet, Dot11Beacon)
         
     def get_display_filters(self) -> List[str]:
         """Get Wireshark display filters for beacon inventory."""
@@ -238,7 +242,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
         """Build comprehensive beacon inventory from packets."""
         for packet in packets:
             try:
-                if not packet.haslayer(Dot11Beacon):
+                if not packet_has_layer(packet, Dot11Beacon):
                     continue
                     
                 entry = self._extract_beacon_entry(packet)
@@ -275,8 +279,8 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
     def _extract_beacon_entry(self, packet: Packet) -> Optional[BeaconInventoryEntry]:
         """Extract comprehensive beacon information."""
         try:
-            dot11 = packet[Dot11]
-            beacon = packet[Dot11Beacon]
+            dot11 = get_packet_layer(packet, "Dot11")
+            beacon = get_packet_layer(packet, "Dot11Beacon")
             
             # Basic information
             bssid = dot11.addr3 if dot11.addr3 else "unknown"
@@ -300,8 +304,8 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
             )
             
             # Extract RSSI from RadioTap
-            if packet.haslayer(RadioTap):
-                radiotap = packet[RadioTap]
+            if packet_has_layer(packet, RadioTap):
+                radiotap = get_packet_layer(packet, "RadioTap")
                 if hasattr(radiotap, 'dBm_AntSignal'):
                     entry.rssi_values.append(radiotap.dBm_AntSignal)
                 if hasattr(radiotap, 'ChannelFrequency'):
@@ -311,8 +315,8 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
             self._parse_basic_capabilities(beacon.cap, entry.capabilities)
             
             # Parse all Information Elements
-            if packet.haslayer(Dot11Elt):
-                self._parse_information_elements(packet[Dot11Elt], entry)
+            if packet_has_layer(packet, Dot11Elt):
+                self._parse_information_elements(get_packet_layer(packet, "Dot11Elt"), entry)
                 
             # Determine band from channel/frequency
             if entry.channel:

@@ -26,6 +26,10 @@ from scapy.layers.dot11 import (
 from scapy.layers.dot11 import RadioTap
 
 from ...core.base_analyzer import BaseAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -117,7 +121,7 @@ class BeaconAnalyzer(BaseAnalyzer):
 
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is a beacon frame."""
-        return packet.haslayer(Dot11Beacon)
+        return packet_has_layer(packet, Dot11Beacon)
         
     def get_display_filters(self) -> List[str]:
         """Get Wireshark display filters for beacon analysis."""
@@ -170,17 +174,17 @@ class BeaconAnalyzer(BaseAnalyzer):
         
         for packet in packets:
             try:
-                if not packet.haslayer(Dot11Beacon):
+                if not packet_has_layer(packet, Dot11Beacon):
                     continue
                     
-                dot11 = packet[Dot11]
-                beacon = packet[Dot11Beacon]
+                dot11 = get_packet_layer(packet, "Dot11")
+                beacon = get_packet_layer(packet, "Dot11Beacon")
                 
                 # Extract basic info
                 bssid = dot11.addr3 if dot11.addr3 else "unknown"
                 
                 # Get packet timestamp
-                packet_time = packet.time if hasattr(packet, 'time') else 0
+                packet_time = get_timestamp(packet) if hasattr(packet, 'time') else 0
                 if hasattr(packet_time, '__float__'):
                     packet_time = float(packet_time)
                 elif hasattr(packet_time, 'val'):
@@ -191,8 +195,8 @@ class BeaconAnalyzer(BaseAnalyzer):
                 # Extract SSID from IEs
                 ssid = ""
                 ies = {}
-                if packet.haslayer(Dot11Elt):
-                    current_ie = packet[Dot11Elt]
+                if packet_has_layer(packet, Dot11Elt):
+                    current_ie = get_packet_layer(packet, "Dot11Elt")
                     while current_ie:
                         ie_type = current_ie.ID
                         ie_data = bytes(current_ie.info) if current_ie.info else b''
@@ -208,8 +212,8 @@ class BeaconAnalyzer(BaseAnalyzer):
                 
                 # Get RSSI if available from RadioTap
                 rssi = None
-                if packet.haslayer(RadioTap):
-                    radiotap = packet[RadioTap]
+                if packet_has_layer(packet, RadioTap):
+                    radiotap = get_packet_layer(packet, "RadioTap")
                     if hasattr(radiotap, 'dBm_AntSignal'):
                         rssi = radiotap.dBm_AntSignal
                 

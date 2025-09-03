@@ -28,6 +28,10 @@ from scapy.layers.dot11 import (
 from scapy.layers.dot11 import RadioTap
 
 from ...core.base_analyzer import BaseAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -158,7 +162,7 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
 
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is a probe request."""
-        return packet.haslayer(Dot11ProbeReq)
+        return packet_has_layer(packet, Dot11ProbeReq)
         
     def get_display_filters(self) -> List[str]:
         """Get Wireshark display filters for probe analysis."""
@@ -219,11 +223,11 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
         """Extract probe request information from packets."""
         for packet in packets:
             try:
-                if not packet.haslayer(Dot11ProbeReq):
+                if not packet_has_layer(packet, Dot11ProbeReq):
                     continue
                     
-                dot11 = packet[Dot11]
-                probe_req = packet[Dot11ProbeReq]
+                dot11 = get_packet_layer(packet, "Dot11")
+                probe_req = get_packet_layer(packet, "Dot11ProbeReq")
                 
                 # Extract basic information
                 client_mac = dot11.addr2 if dot11.addr2 else "unknown"
@@ -231,7 +235,7 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                     continue
                     
                 # Get packet timestamp
-                timestamp = packet.time if hasattr(packet, 'time') else 0
+                timestamp = get_timestamp(packet) if hasattr(packet, 'time') else 0
                 if hasattr(timestamp, '__float__'):
                     timestamp = float(timestamp)
                 elif hasattr(timestamp, 'val'):
@@ -247,8 +251,8 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                 vendor_ies = {}
                 channel = None
                 
-                if packet.haslayer(Dot11Elt):
-                    current_ie = packet[Dot11Elt]
+                if packet_has_layer(packet, Dot11Elt):
+                    current_ie = get_packet_layer(packet, "Dot11Elt")
                     while current_ie:
                         ie_id = current_ie.ID
                         ie_data = bytes(current_ie.info) if current_ie.info else b''
@@ -277,8 +281,8 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                 
                 # Extract RSSI from RadioTap
                 rssi = None
-                if packet.haslayer(RadioTap):
-                    radiotap = packet[RadioTap]
+                if packet_has_layer(packet, RadioTap):
+                    radiotap = get_packet_layer(packet, "RadioTap")
                     if hasattr(radiotap, 'dBm_AntSignal'):
                         rssi = radiotap.dBm_AntSignal
                 

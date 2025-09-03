@@ -29,6 +29,10 @@ from scapy.layers.eap import EAPOL, EAP
 from scapy.layers.dot11 import Dot11Elt
 
 from ...core.base_analyzer import BaseAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -260,20 +264,26 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
 
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is relevant for EAPOL/PMF analysis."""
-        return (packet.haslayer(EAPOL) or 
-                packet.haslayer(EAP) or
-                (packet.haslayer(Dot11) and self._is_protected_mgmt_frame(packet)))
+        return (packet_has_layer(packet, "EAPOL") or 
+                packet_has_layer(packet, "EAP") or
+                (packet_has_layer(packet, "Dot11") and self._is_protected_mgmt_frame(packet)))
         
     def _is_protected_mgmt_frame(self, packet: Packet) -> bool:
         """Check if packet is a protected management frame."""
-        if not packet.haslayer(Dot11):
+        if not packet_has_layer(packet, "Dot11"):
             return False
             
-        dot11 = packet[Dot11]
+        dot11 = get_packet_layer(packet, "Dot11")
+        if not dot11:
+            return False
+            
         # Check if frame is protected (FCfield bit 6)
-        if hasattr(dot11, 'FCfield') and (dot11.FCfield & 0x40):
+        fc_field = get_packet_field(packet, "Dot11", "FCfield")
+        frame_type = get_packet_field(packet, "Dot11", "type")
+        
+        if fc_field is not None and (fc_field & 0x40):
             # Check if it's a management frame (type 0)
-            if dot11.type == 0:
+            if frame_type == 0:
                 return True
         return False
         
@@ -367,13 +377,13 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
         """Process EAPOL and EAP frames."""
         for packet in packets:
             try:
-                if packet.haslayer(EAPOL):
+                if packet_has_layer(packet, EAPOL):
                     eapol_frame = self._extract_eapol_frame(packet)
                     if eapol_frame:
                         self.eapol_frames.append(eapol_frame)
                         self._process_eapol_frame(eapol_frame)
                         
-                elif packet.haslayer(EAP):
+                elif packet_has_layer(packet, EAP):
                     self._process_eap_frame(packet)
                     
                 # Track protected management frames
@@ -387,14 +397,14 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
     def _extract_eapol_frame(self, packet: Packet) -> Optional[EAPOLFrame]:
         """Extract EAPOL frame information."""
         try:
-            if not packet.haslayer(EAPOL):
+            if not packet_has_layer(packet, EAPOL):
                 return None
                 
-            dot11 = packet[Dot11]
-            eapol = packet[EAPOL]
+            dot11 = get_packet_layer(packet, "Dot11")
+            eapol = get_packet_layer(packet, "EAPOL")
             
             # Get timestamp
-            timestamp = packet.time if hasattr(packet, 'time') else 0
+            timestamp = get_timestamp(packet) if hasattr(packet, 'time') else 0
             if hasattr(timestamp, '__float__'):
                 timestamp = float(timestamp)
             elif hasattr(timestamp, 'val'):
@@ -406,7 +416,7 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                 timestamp=timestamp,
                 source_mac=dot11.addr2 if dot11.addr2 else "unknown",
                 dest_mac=dot11.addr1 if dot11.addr1 else "unknown",
-                frame_type=eapol.type if hasattr(eapol, 'type') else 0
+                frame_type=get_packet_field(packet, "Dot11", "type") if hasattr(eapol, 'type') else 0
             )
             
             # Extract EAPOL-Key specific fields
@@ -537,11 +547,11 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
     def _process_eap_frame(self, packet: Packet) -> None:
         """Process EAP frame for session tracking."""
         try:
-            if not packet.haslayer(EAP):
+            if not packet_has_layer(packet, EAP):
                 return
                 
-            dot11 = packet[Dot11] 
-            eap = packet[EAP]
+            dot11 = get_packet_layer(packet, "Dot11") 
+            eap = get_packet_layer(packet, "EAP")
             
             session_key = f"{dot11.addr2}:{dot11.addr1}"
             
@@ -550,7 +560,7 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                     sta_mac=dot11.addr2,
                     ap_mac=dot11.addr1,
                     session_id=session_key,
-                    start_time=datetime.fromtimestamp(float(packet.time))
+                    start_time=datetime.fromtimestamp(float(get_timestamp(packet)))
                 )
                 
             session = self.eap_sessions[session_key]
@@ -558,7 +568,7 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
             # Analyze EAP method
             if hasattr(eap, 'type'):
                 try:
-                    method = EAPMethod(eap.type)
+                    method = EAPMethod(get_packet_field(packet, "Dot11", "type"))
                     if method not in session.methods_attempted:
                         session.methods_attempted.append(method)
                 except ValueError:
@@ -567,10 +577,10 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
             # Track frame types
             if hasattr(eap, 'code'):
                 if eap.code == 1:  # Request
-                    if hasattr(eap, 'type') and eap.type == 1:  # Identity
+                    if hasattr(eap, 'type') and get_packet_field(packet, "Dot11", "type") == 1:  # Identity
                         session.identity_requests += 1
                 elif eap.code == 2:  # Response
-                    if hasattr(eap, 'type') and eap.type == 1:  # Identity
+                    if hasattr(eap, 'type') and get_packet_field(packet, "Dot11", "type") == 1:  # Identity
                         session.identity_responses += 1
                     else:
                         session.challenge_responses += 1
@@ -586,7 +596,7 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
     def _process_protected_mgmt_frame(self, packet: Packet) -> None:
         """Process protected management frame for PMF analysis."""
         try:
-            dot11 = packet[Dot11]
+            dot11 = get_packet_layer(packet, "Dot11")
             bssid = dot11.addr3 if dot11.addr3 else dot11.addr2
             
             if bssid in self.pmf_analysis:
@@ -615,8 +625,8 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
     def _analyze_pmf_implementation(self, packets: List[Packet]) -> None:
         """Analyze PMF implementation and compliance."""
         for packet in packets:
-            if packet.haslayer(Dot11Deauth) or packet.haslayer(Dot11Disas):
-                dot11 = packet[Dot11]
+            if packet_has_layer(packet, Dot11Deauth) or packet_has_layer(packet, Dot11Disas):
+                dot11 = get_packet_layer(packet, "Dot11")
                 bssid = dot11.addr3 if dot11.addr3 else dot11.addr2
                 
                 if bssid in self.pmf_analysis:

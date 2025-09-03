@@ -21,6 +21,10 @@ from scapy.layers.dot11 import Dot11AssoReq, Dot11AssoResp, Dot11ReassoReq, Dot1
 from scapy.layers.dot11 import Dot11QoS, Dot11CCMP, Dot11WEP
 
 from ...core.base_analyzer import BaseAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -175,7 +179,7 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
                 self._analyze_radiotap_header(packet)
                 
                 # Analyze 802.11 frame if present
-                if packet.haslayer(Dot11):
+                if packet_has_layer(packet, Dot11):
                     self._analyze_dot11_frame(packet, i)
                     
                 # Check for duplicates (simple hash-based)
@@ -229,7 +233,7 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
                 
     def _analyze_dot11_frame(self, packet: Packet, packet_index: int) -> None:
         """Analyze 802.11 frame for quality indicators."""
-        dot11 = packet[Dot11]
+        dot11 = get_packet_layer(packet, "Dot11")
         
         # Count frame types
         frame_type = dot11.type
@@ -278,10 +282,10 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
                 
     def _check_monitor_mode_indicators(self, packet: Packet) -> None:
         """Check for indicators that suggest monitor mode operation."""
-        if not packet.haslayer(Dot11):
+        if not packet_has_layer(packet, Dot11):
             return
             
-        dot11 = packet[Dot11]
+        dot11 = get_packet_layer(packet, "Dot11")
         
         # Strong monitor mode indicators
         if dot11.type == 0:  # Management frames
@@ -826,8 +830,8 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
     def _create_packet_signature(self, packet: Packet) -> str:
         """Create a simple signature for duplicate detection."""
         try:
-            if packet.haslayer(Dot11):
-                dot11 = packet[Dot11]
+            if packet_has_layer(packet, Dot11):
+                dot11 = get_packet_layer(packet, "Dot11")
                 # Simple signature based on key fields
                 sig_parts = [
                     str(dot11.type),
@@ -845,7 +849,7 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         """Extract timestamp from packet."""
         if hasattr(packet, 'time'):
             try:
-                time_val = packet.time
+                time_val = get_timestamp(packet)
                 if hasattr(time_val, '__float__'):
                     return float(time_val)
                 elif hasattr(time_val, 'val'):

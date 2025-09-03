@@ -14,6 +14,10 @@ from scapy.all import Packet
 from scapy.layers.dot11 import Dot11, Dot11Deauth
 
 from ...core.base_analyzer import SecurityThreatAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -71,7 +75,7 @@ class DeauthFloodDetector(SecurityThreatAnalyzer):
         
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is a deauthentication frame."""
-        return packet.haslayer(Dot11Deauth)
+        return packet_has_layer(packet, Dot11Deauth)
         
     def analyze(self, packets: List[Packet], context: AnalysisContext) -> List[Finding]:
         """
@@ -113,11 +117,11 @@ class DeauthFloodDetector(SecurityThreatAnalyzer):
         """Collect statistics from deauth packets."""
         for i, packet in enumerate(packets):
             try:
-                if not packet.haslayer(Dot11) or not packet.haslayer(Dot11Deauth):
+                if not packet_has_layer(packet, Dot11) or not packet_has_layer(packet, Dot11Deauth):
                     continue
                     
-                dot11 = packet[Dot11]
-                deauth = packet[Dot11Deauth]
+                dot11 = get_packet_layer(packet, "Dot11")
+                deauth = get_packet_layer(packet, "Dot11Deauth")
                 
                 # Basic addressing - safely extract MAC addresses
                 src_mac = self._normalize_mac(str(dot11.addr2)) if hasattr(dot11, 'addr2') and dot11.addr2 else None
@@ -142,7 +146,7 @@ class DeauthFloodDetector(SecurityThreatAnalyzer):
                 timestamp = 0.0
                 if hasattr(packet, 'time'):
                     try:
-                        time_val = packet.time
+                        time_val = get_timestamp(packet)
                         if hasattr(time_val, '__float__'):
                             timestamp = float(time_val)
                         elif hasattr(time_val, 'val'):

@@ -44,6 +44,10 @@ except ImportError:
         TLS_AVAILABLE = False
 
 from ...core.base_analyzer import BaseAnalyzer
+from ...utils.analyzer_helpers import (
+    packet_has_layer, get_packet_layer, get_packet_field,
+    get_src_mac, get_dst_mac, get_bssid, get_timestamp
+)
 from ...core.models import (
     Finding, 
     Severity, 
@@ -262,8 +266,8 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
             "wlan.fc.type_subtype == 0",   # Association request
             "wlan.fc.type_subtype == 1",   # Association response
             "ssl.handshake.type == 11",    # TLS Certificate messages
-            "eap.type",        # EAP method types
-            "radius.code"      # RADIUS message codes
+            "eap.type",                    # EAP method types
+            "radius.code"                  # RADIUS message codes
         ]
         
         self.analysis_order = 50  # Run after EAPOL/PMF and WPA security analyzers
@@ -291,15 +295,15 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
         
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is relevant for enterprise security analysis."""
-        return (packet.haslayer(EAPOL) or
-                packet.haslayer(EAP) or
-                packet.haslayer(Dot11Auth) or
-                packet.haslayer(Dot11AssoReq) or
-                packet.haslayer(Dot11AssoResp) or
-                (packet.haslayer(UDP) and 
-                 (packet[UDP].sport == 1812 or packet[UDP].dport == 1812 or  # RADIUS auth
-                  packet[UDP].sport == 1813 or packet[UDP].dport == 1813)) or  # RADIUS accounting
-                (TLS_AVAILABLE and packet.haslayer(TLS)))
+        return (packet_has_layer(packet, EAPOL) or
+                packet_has_layer(packet, EAP) or
+                packet_has_layer(packet, Dot11Auth) or
+                packet_has_layer(packet, Dot11AssoReq) or
+                packet_has_layer(packet, Dot11AssoResp) or
+                (packet_has_layer(packet, UDP) and 
+                 (get_packet_layer(packet, "UDP").sport == 1812 or get_packet_layer(packet, "UDP").dport == 1812 or  # RADIUS auth
+                  get_packet_layer(packet, "UDP").sport == 1813 or get_packet_layer(packet, "UDP").dport == 1813)) or  # RADIUS accounting
+                (TLS_AVAILABLE and packet_has_layer(packet, TLS)))
         
     def get_display_filters(self) -> List[str]:
         """Get Wireshark display filters."""
@@ -373,13 +377,13 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
             try:
                 timestamp = self._extract_timestamp(packet)
                 
-                if packet.haslayer(Dot11Auth):
+                if packet_has_layer(packet, Dot11Auth):
                     self._process_dot11_auth(packet, timestamp)
-                elif packet.haslayer(Dot11AssoReq) or packet.haslayer(Dot11AssoResp):
+                elif packet_has_layer(packet, Dot11AssoReq) or packet_has_layer(packet, Dot11AssoResp):
                     self._process_dot11_assoc(packet, timestamp)
-                elif packet.haslayer(EAPOL):
+                elif packet_has_layer(packet, EAPOL):
                     self._process_eapol_frame(packet, timestamp)
-                elif packet.haslayer(EAP):
+                elif packet_has_layer(packet, EAP):
                     self._process_eap_frame(packet, timestamp)
                     
             except Exception as e:
@@ -390,7 +394,7 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
         """Extract timestamp from packet."""
         try:
             if hasattr(packet, 'time'):
-                time_val = packet.time
+                time_val = get_timestamp(packet)
                 if hasattr(time_val, '__float__'):
                     return datetime.fromtimestamp(float(time_val))
                 elif hasattr(time_val, 'val'):
@@ -403,11 +407,11 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
         
     def _process_dot11_auth(self, packet: Packet, timestamp: datetime) -> None:
         """Process 802.11 authentication frames."""
-        if not packet.haslayer(Dot11):
+        if not packet_has_layer(packet, Dot11):
             return
             
-        dot11 = packet[Dot11]
-        auth = packet[Dot11Auth]
+        dot11 = get_packet_layer(packet, "Dot11")
+        auth = get_packet_layer(packet, "Dot11Auth")
         
         client_mac = dot11.addr2
         ap_bssid = dot11.addr1
@@ -429,12 +433,12 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
             
     def _process_dot11_assoc(self, packet: Packet, timestamp: datetime) -> None:
         """Process 802.11 association frames."""
-        if not packet.haslayer(Dot11):
+        if not packet_has_layer(packet, Dot11):
             return
             
-        dot11 = packet[Dot11]
+        dot11 = get_packet_layer(packet, "Dot11")
         
-        if packet.haslayer(Dot11AssoReq):
+        if packet_has_layer(packet, Dot11AssoReq):
             client_mac = dot11.addr2
             ap_bssid = dot11.addr1
         else:  # Dot11AssoResp
@@ -446,18 +450,18 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
         if flow_key in self.authentication_flows:
             flow = self.authentication_flows[flow_key]
             
-            if packet.haslayer(Dot11AssoResp):
-                assoc_resp = packet[Dot11AssoResp]
+            if packet_has_layer(packet, Dot11AssoResp):
+                assoc_resp = get_packet_layer(packet, "Dot11AssoResp")
                 if hasattr(assoc_resp, 'status') and assoc_resp.status == 0:
                     flow.dot11_assoc_complete = True
                     
     def _process_eapol_frame(self, packet: Packet, timestamp: datetime) -> None:
         """Process EAPOL frames for authentication flow."""
-        if not packet.haslayer(Dot11) or not packet.haslayer(EAPOL):
+        if not packet_has_layer(packet, Dot11) or not packet_has_layer(packet, EAPOL):
             return
             
-        dot11 = packet[Dot11]
-        eapol = packet[EAPOL]
+        dot11 = get_packet_layer(packet, "Dot11")
+        eapol = get_packet_layer(packet, "EAPOL")
         
         # Determine client and AP
         if dot11.addr1.startswith('ff:ff:ff'):  # Broadcast
@@ -481,9 +485,9 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
         
         # Analyze EAPOL type
         if hasattr(eapol, 'type'):
-            if eapol.type == 1:  # EAPOL-Start
+            if get_packet_field(packet, "Dot11", "type") == 1:  # EAPOL-Start
                 flow.eap_start_sent = True
-            elif eapol.type == 3:  # EAPOL-Key
+            elif get_packet_field(packet, "Dot11", "type") == 3:  # EAPOL-Key
                 # This indicates key exchange (post-authentication)
                 flow.eapol_key_exchange_complete = True
                 flow.authentication_successful = True
@@ -491,11 +495,11 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
                 
     def _process_eap_frame(self, packet: Packet, timestamp: datetime) -> None:
         """Process EAP frames for method analysis."""
-        if not packet.haslayer(EAP):
+        if not packet_has_layer(packet, EAP):
             return
             
-        eap = packet[EAP]
-        dot11 = packet[Dot11] if packet.haslayer(Dot11) else None
+        eap = get_packet_layer(packet, "EAP")
+        dot11 = get_packet_layer(packet, "Dot11") if packet_has_layer(packet, Dot11) else None
         
         if dot11:
             client_mac = dot11.addr2
@@ -532,12 +536,12 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
         if hasattr(eap, 'code'):
             if eap.code == 1:  # Request
                 if hasattr(eap, 'type'):
-                    if eap.type == 1:  # Identity
+                    if get_packet_field(packet, "Dot11", "type") == 1:  # Identity
                         flow.eap_identity_exchanged = True
                     else:
                         # EAP method
                         try:
-                            method = EAPMethodType(eap.type)
+                            method = EAPMethodType(get_packet_field(packet, "Dot11", "type"))
                             if not flow.eap_method_negotiated:
                                 flow.eap_method_negotiated = method
                                 
@@ -550,10 +554,10 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
                                 flow.weak_methods_attempted.append(method)
                                 
                         except ValueError:
-                            self.logger.debug(f"Unknown EAP method type: {eap.type}")
+                            self.logger.debug(f"Unknown EAP method type: {get_packet_field(packet, 'Dot11', 'type')}")
                             
             elif eap.code == 2:  # Response
-                if hasattr(eap, 'type') and eap.type == 1:  # Identity response
+                if hasattr(eap, 'type') and get_packet_field(packet, "Dot11", "type") == 1:  # Identity response
                     # Extract identity if available
                     if hasattr(eap, 'identity'):
                         flow.identity = eap.identity.decode('utf-8', errors='ignore')
@@ -580,10 +584,10 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
         """Analyze RADIUS client-server communications."""
         for packet in packets:
             try:
-                if not (packet.haslayer(UDP) and packet.haslayer(Radius)):
+                if not (packet_has_layer(packet, UDP) and packet_has_layer(packet, Radius)):
                     continue
                     
-                if not (packet[UDP].sport in [1812, 1813] or packet[UDP].dport in [1812, 1813]):
+                if not (get_packet_layer(packet, "UDP").sport in [1812, 1813] or get_packet_layer(packet, "UDP").dport in [1812, 1813]):
                     continue
                     
                 self._process_radius_packet(packet)
@@ -594,15 +598,15 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
                 
     def _process_radius_packet(self, packet: Packet) -> None:
         """Process individual RADIUS packet."""
-        if not packet.haslayer(IP) or not packet.haslayer(Radius):
+        if not packet_has_layer(packet, IP) or not packet_has_layer(packet, Radius):
             return
             
-        ip = packet[IP]
-        radius = packet[Radius]
+        ip = get_packet_layer(packet, "IP")
+        radius = get_packet_layer(packet, "Radius")
         timestamp = self._extract_timestamp(packet)
         
         # Determine client and server
-        if packet[UDP].dport in [1812, 1813]:  # Request
+        if get_packet_layer(packet, "UDP").dport in [1812, 1813]:  # Request
             client_ip = ip.src
             server_ip = ip.dst
         else:  # Response
@@ -636,7 +640,7 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
         # Extract NAS identifier if available
         if hasattr(radius, 'attributes'):
             for attr in radius.attributes:
-                if hasattr(attr, 'type') and attr.type == 32:  # NAS-Identifier
+                if hasattr(attr, 'type') and get_packet_field(packet, "Dot11", "type") == 32:  # NAS-Identifier
                     conv.nas_identifier = attr.value.decode('utf-8', errors='ignore')
                     
     def _analyze_tls_certificates(self, packets: List[Packet]) -> None:
@@ -646,12 +650,12 @@ class EnterpriseSecurityAnalyzer(BaseAnalyzer):
             
         for packet in packets:
             try:
-                if packet.haslayer(TLSCertificate):
+                if packet_has_layer(packet, TLSCertificate):
                     self._extract_certificate_details(packet)
-                elif packet.haslayer(TLSHandshake):
+                elif packet_has_layer(packet, TLSHandshake):
                     # Look for certificate handshake messages
-                    tls_handshake = packet[TLSHandshake]
-                    if hasattr(tls_handshake, 'type') and tls_handshake.type == 11:  # Certificate
+                    tls_handshake = get_packet_layer(packet, "TLSHandshake")
+                    if hasattr(tls_handshake, 'type') and get_packet_field(packet, "Dot11", "type") == 11:  # Certificate
                         self._extract_certificate_details(packet)
                         
             except Exception as e:
