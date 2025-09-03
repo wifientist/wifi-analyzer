@@ -358,6 +358,9 @@ class AnalysisContext:
     # Analysis configuration
     config: Dict[str, Any] = field(default_factory=dict)
     
+    # Metadata for sharing analysis results between analyzers
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
     def get_entity(self, mac_address: str) -> Optional[NetworkEntity]:
         """Get network entity by MAC address."""
         return self.network_entities.get(mac_address)

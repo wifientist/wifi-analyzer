@@ -75,6 +75,15 @@ class PacketAnalyzer:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         
+        # Add detailed packet parsing statistics
+        self.parsing_stats = {
+            'packets_processed': 0,
+            'parsing_errors': 0,
+            'layer_extraction_errors': 0,
+            'timestamp_extraction_errors': 0,
+            'address_extraction_errors': 0
+        }
+        
         # OUI database for vendor identification (partial)
         self.oui_database = {
             '00:1b:63': 'Apple',
@@ -131,6 +140,7 @@ class PacketAnalyzer:
         seen_packets = set()  # For duplicate detection
         
         for i, packet in enumerate(packets):
+            self.parsing_stats['packets_processed'] += 1
             try:
                 # Check for duplicates using a simple hash
                 packet_hash = self._get_packet_hash(packet)
@@ -190,7 +200,17 @@ class PacketAnalyzer:
                     stats['eapol_frames'] += 1
                     
             except Exception as e:
-                self.logger.debug(f"Error processing packet {i}: {e}")
+                self.parsing_stats['parsing_errors'] += 1
+                self.logger.warning(f"Error processing packet {i}: {e}")
+                # Log more details about the problematic packet
+                try:
+                    if hasattr(packet, '__class__'):
+                        self.logger.debug(f"Packet {i} type: {packet.__class__.__name__}")
+                    if hasattr(packet, '__dict__'):
+                        fields = list(packet.__dict__.keys())[:5]  # First 5 fields
+                        self.logger.debug(f"Packet {i} fields: {fields}")
+                except:
+                    pass
                 continue
                 
         # Convert sets to lists for JSON serialization
@@ -199,6 +219,12 @@ class PacketAnalyzer:
         stats['ssids'] = list(stats['ssids'])
         stats['bssids'] = list(stats['bssids'])
         stats['stations'] = list(stats['stations'])
+        
+        # Log parsing statistics
+        self.logger.info(f"Packet analysis complete: {self.parsing_stats}")
+        if self.parsing_stats['parsing_errors'] > 0:
+            error_rate = self.parsing_stats['parsing_errors'] / self.parsing_stats['packets_processed'] * 100
+            self.logger.warning(f"Packet parsing error rate: {error_rate:.1f}% ({self.parsing_stats['parsing_errors']}/{self.parsing_stats['packets_processed']})")
         
         return stats
         

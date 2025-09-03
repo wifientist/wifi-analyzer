@@ -11,8 +11,6 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 import statistics
 
-from scapy.all import rdpcap, Packet
-
 from .core.models import (
     AnalysisResults, 
     AnalysisContext, 
@@ -25,6 +23,7 @@ from .core.models import (
     PacketParsingError
 )
 from .core.base_analyzer import BaseAnalyzer, AnalyzerRegistry
+from .core.packet_loader import UnifiedPacketLoader, UnifiedPacketInfo
 from .utils.packet_utils import PacketAnalyzer
 from .expert.agent import WirelessExpertAgent
 
@@ -53,8 +52,25 @@ class WirelessPCAPAnalyzer:
         
         # Initialize components
         self.registry = AnalyzerRegistry()
+        
+        # Configure packet loader based on user preferences
+        preferred_parser = self.config.get('preferred_packet_parser', 'auto')
+        self.packet_loader = UnifiedPacketLoader(prefer_library=preferred_parser)
+        
         self.packet_analyzer = PacketAnalyzer()
         self.expert_agent = WirelessExpertAgent()
+        
+        # Flag to track if packet loader has been configured
+        self._loader_configured = False
+        
+        # Adaptive retry statistics
+        self.retry_stats = {
+            'total_analyzers_run': 0,
+            'analyzers_retried': 0,
+            'successful_retries': 0,
+            'failed_retries': 0,
+            'parser_switches': {}  # Track which parsers were switched to
+        }
         
         # Performance tracking
         self.analysis_stats = {
@@ -72,14 +88,28 @@ class WirelessPCAPAnalyzer:
         try:
             # Import and register core analyzers
             from .analyzers.security.deauth_detector import DeauthFloodDetector
+            from .analyzers.security.wpa_security_posture import WPASecurityPostureAnalyzer
+            from .analyzers.security.rogue_ap_threats import RogueAPSecurityAnalyzer
+            from .analyzers.security.enterprise_security import EnterpriseSecurityAnalyzer
             from .analyzers.core.signal_analyzer import RFPHYSignalAnalyzer
             from .analyzers.core.capture_validator import CaptureQualityAnalyzer
             from .analyzers.core.beacon_analyzer import BeaconAnalyzer
+            from .analyzers.core.beacon_inventory import BeaconInventoryAnalyzer
+            from .analyzers.core.probe_behavior import ProbeBehaviorAnalyzer
+            from .analyzers.core.auth_assoc_flow import AuthAssocFlowAnalyzer
+            from .analyzers.core.eapol_pmf import EAPOLPMFAnalyzer
             
             self.registry.register(CaptureQualityAnalyzer())
             self.registry.register(DeauthFloodDetector())
+            self.registry.register(WPASecurityPostureAnalyzer())
+            self.registry.register(RogueAPSecurityAnalyzer())
+            self.registry.register(EnterpriseSecurityAnalyzer())
             self.registry.register(RFPHYSignalAnalyzer())
             self.registry.register(BeaconAnalyzer())
+            self.registry.register(BeaconInventoryAnalyzer())
+            self.registry.register(ProbeBehaviorAnalyzer())
+            self.registry.register(AuthAssocFlowAnalyzer())
+            self.registry.register(EAPOLPMFAnalyzer())
             
             self.logger.info(f"Registered {len(self.registry.get_all_analyzers())} analyzers")
             
@@ -183,77 +213,40 @@ class WirelessPCAPAnalyzer:
             if not pcap_path.exists():
                 raise AnalysisError(f"PCAP file not found: {pcap_file}")
                 
-            # Load packets
-            packets = self._load_packets(pcap_file, max_packets)
-            self.logger.info(f"Loaded {len(packets)} packets")
+            # Load packets using unified loader
+            unified_packets, loading_metadata = self.packet_loader.load_packets(pcap_file, max_packets)
+            self.logger.info(f"Loaded {len(unified_packets)} packets from {pcap_file} using {loading_metadata.get('library_used', 'unknown')}")
+            
+            # Log loading diagnostics
+            self._log_loading_diagnostics(unified_packets, loading_metadata)
             
             # Initialize results and context
             results = AnalysisResults(pcap_file=pcap_file)
-            context = self._create_analysis_context(pcap_file, packets)
+            context = self._create_analysis_context(pcap_file, unified_packets)
             
             # Gather basic metrics
-            results.metrics = self._gather_basic_metrics(packets, context)
+            results.metrics = self._gather_basic_metrics(unified_packets, context)
             
             # Get analyzers to run
             analyzers_to_run = self._get_analyzers_to_run(analyzers)
             self.logger.info(f"Running {len(analyzers_to_run)} analyzers")
             
-            # Run analyzers
+            # Configure packet loader based on enabled analyzers (if not already configured)
+            if not self._loader_configured:
+                analyzer_names = [analyzer.name for analyzer in analyzers_to_run]
+                self.packet_loader.configure_for_analyzers(analyzer_names)
+                self._loader_configured = True
+            
+            # Run analyzers with adaptive retry logic
             all_findings = []
             for analyzer in analyzers_to_run:
-                try:
-                    analyzer_start = time.time()
-                    
-                    # Pre-analysis setup
-                    analyzer.pre_analysis_setup(context)
-                    
-                    # Filter applicable packets
-                    applicable_packets = [
-                        p for p in packets 
-                        if analyzer.is_applicable(p)
-                    ]
-                    
-                    self.logger.debug(
-                        f"Running {analyzer.name} on {len(applicable_packets)} applicable packets"
-                    )
-                    
-                    # Run analysis
-                    findings = analyzer.analyze(applicable_packets, context)
-                    
-                    # Post-analysis cleanup
-                    analyzer.post_analysis_cleanup(context)
-                    
-                    # Track performance
-                    analyzer_time = time.time() - analyzer_start
-                    analyzer.processing_time = analyzer_time
-                    analyzer.packets_processed = len(applicable_packets)
-                    
-                    # Add findings
-                    all_findings.extend(findings)
+                analyzer_findings = self._run_analyzer_with_retry(
+                    analyzer, unified_packets, context, pcap_file, max_packets
+                )
+                all_findings.extend(analyzer_findings)
+                
+                if analyzer_findings:  # Only add to run list if we got some results
                     results.analyzers_run.append(analyzer.name)
-                    
-                    self.logger.info(
-                        f"{analyzer.name}: {len(findings)} findings in {analyzer_time:.2f}s"
-                    )
-                    
-                except Exception as e:
-                    self.logger.error(f"Error in {analyzer.name}: {e}")
-                    
-                    # Create error finding
-                    error_finding = Finding(
-                        category=AnalysisCategory.ANOMALY_DETECTION,
-                        severity=Severity.ERROR,
-                        title=f"Analyzer Error: {analyzer.name}",
-                        description=f"Error occurred during analysis: {str(e)}",
-                        details={
-                            "analyzer": analyzer.name,
-                            "error_type": type(e).__name__,
-                            "error_message": str(e)
-                        },
-                        analyzer_name=analyzer.name,
-                        analyzer_version=analyzer.version
-                    )
-                    all_findings.append(error_finding)
                     
             # Add all findings to results
             results.findings = all_findings
@@ -272,7 +265,11 @@ class WirelessPCAPAnalyzer:
             total_time = time.time() - start_time
             results.metrics.analysis_duration_seconds = total_time
             
-            self._update_performance_stats(total_time, len(packets), analyzers_to_run)
+            self._update_performance_stats(total_time, len(unified_packets), analyzers_to_run)
+            
+            # Store loading metadata and retry statistics in results
+            results.metadata['packet_loading'] = loading_metadata
+            results.metadata['adaptive_retry_stats'] = self.retry_stats.copy()
             
             self.logger.info(
                 f"Analysis complete: {len(all_findings)} findings in {total_time:.2f}s"
@@ -284,44 +281,384 @@ class WirelessPCAPAnalyzer:
             self.logger.error(f"Analysis failed: {e}")
             raise AnalysisError(f"Analysis failed: {e}") from e
             
-    def _load_packets(self, pcap_file: str, max_packets: Optional[int]) -> List[Packet]:
+    def _log_loading_diagnostics(self, unified_packets: List[UnifiedPacketInfo], metadata: Dict[str, Any]) -> None:
+        """Log packet loading diagnostics."""
+        library_used = metadata.get('library_used', 'unknown')
+        loading_time = metadata.get('loading_time', 0)
+        
+        self.logger.info(f"Packet loading diagnostics:")
+        self.logger.info(f"  Library: {library_used}")
+        self.logger.info(f"  Loading time: {loading_time:.2f}s")
+        self.logger.info(f"  Success rate: {metadata.get('successfully_parsed', 0)}/{metadata.get('total_raw_packets', 0)}")
+        
+        # Log parsing errors if any
+        parsing_errors = metadata.get('parsing_errors', {})
+        if parsing_errors:
+            self.logger.warning(f"  Parsing errors: {parsing_errors}")
+            
+        # Log field availability
+        if 'parser_specific_info' in metadata:
+            parser_info = metadata['parser_specific_info']
+            if 'field_availability' in parser_info:
+                field_avail = parser_info['field_availability']
+                total_packets = len(unified_packets)
+                if total_packets > 0:
+                    self.logger.info(f"  Field availability rates:")
+                    for field, count in field_avail.items():
+                        rate = (count / total_packets) * 100
+                        self.logger.info(f"    {field}: {rate:.1f}% ({count}/{total_packets})")
+                        
+        # Sample packet analysis
+        if unified_packets:
+            sample_packet = unified_packets[0]
+            self.logger.info(f"  Sample packet: {sample_packet.frame_name} from {sample_packet.parsing_library}")
+            if sample_packet.parsing_errors:
+                self.logger.warning(f"    Parsing issues: {sample_packet.parsing_errors[:3]}")
+    
+    def _is_packet_applicable(self, unified_packet: UnifiedPacketInfo, analyzer: BaseAnalyzer) -> bool:
+        """Check if unified packet is applicable to analyzer."""
+        # For analyzers expecting raw packets, we need to check using the raw packet
+        if unified_packet.raw_packet is None:
+            return False
+            
+        # Try the analyzer's is_applicable method with the raw packet
+        try:
+            return analyzer.is_applicable(unified_packet.raw_packet)
+        except Exception as e:
+            # If the analyzer's method fails, fall back to frame type checking
+            self.logger.debug(f"Analyzer {analyzer.name} is_applicable failed: {e}")
+            
+            # Basic frame type compatibility check based on analyzer name/category
+            analyzer_name = analyzer.name.lower()
+            frame_name = unified_packet.frame_name.lower()
+            
+            # Common mappings
+            if "beacon" in analyzer_name and "beacon" in frame_name:
+                return True
+            elif "deauth" in analyzer_name and "deauth" in frame_name:
+                return True
+            elif "probe" in analyzer_name and "probe" in frame_name:
+                return True
+            elif "security" in analyzer_name and unified_packet.frame_type == 0:  # Management frames
+                return True
+            elif "signal" in analyzer_name and unified_packet.rssi is not None:  # Has RSSI data
+                return True
+                
+            return False
+    
+    def _run_analyzer_with_retry(
+        self, 
+        analyzer: BaseAnalyzer, 
+        current_packets: List[UnifiedPacketInfo], 
+        context: AnalysisContext,
+        pcap_file: str,
+        max_packets: Optional[int]
+    ) -> List[Finding]:
         """
-        Load packets from PCAP file.
+        Run analyzer with adaptive retry using different parsers if needed.
         
         Args:
-            pcap_file: Path to PCAP file
+            analyzer: Analyzer to run
+            current_packets: Currently loaded unified packets
+            context: Analysis context
+            pcap_file: Path to PCAP file for retry loading
             max_packets: Maximum packets to load
             
         Returns:
-            List of packets
-            
-        Raises:
-            PacketParsingError: If PCAP parsing fails
+            List of findings from successful analysis
         """
-        try:
-            packets = rdpcap(pcap_file)
+        # Update retry statistics
+        self.retry_stats['total_analyzers_run'] += 1
+        
+        # First attempt with current packets
+        result = self._attempt_analyzer_run(analyzer, current_packets, context, attempt=1)
+        
+        if result['success'] and not self._should_retry_with_different_parser(result):
+            # First attempt succeeded and results are satisfactory
+            return result['findings']
+        
+        # Determine if we should retry with a different parser
+        if self._should_retry_with_different_parser(result):
+            self.retry_stats['analyzers_retried'] += 1
             
-            if max_packets and len(packets) > max_packets:
-                self.logger.info(f"Limiting to {max_packets} packets (total: {len(packets)})")
-                packets = packets[:max_packets]
-                
-            return packets
+            original_parser = current_packets[0].parsing_library if current_packets else 'unknown'
+            self.logger.warning(
+                f"{analyzer.name}: Poor results with {original_parser} parser. "
+                f"Attempting retry with alternative parser."
+            )
+            
+            # Try alternative parsers
+            retry_findings = self._retry_with_alternative_parsers(
+                analyzer, pcap_file, max_packets, context, 
+                current_library=original_parser
+            )
+            
+            if retry_findings:
+                self.retry_stats['successful_retries'] += 1
+                return retry_findings
+            else:
+                self.retry_stats['failed_retries'] += 1
+        
+        # If we get here, return whatever we got from the first attempt (might be error findings)
+        return result['findings']
+    
+    def _attempt_analyzer_run(
+        self, 
+        analyzer: BaseAnalyzer, 
+        unified_packets: List[UnifiedPacketInfo], 
+        context: AnalysisContext, 
+        attempt: int = 1
+    ) -> Dict[str, Any]:
+        """
+        Attempt to run analyzer and evaluate the results.
+        
+        Returns:
+            Dict with 'success', 'findings', 'quality_metrics' keys
+        """
+        result = {
+            'success': False,
+            'findings': [],
+            'quality_metrics': {},
+            'error': None
+        }
+        
+        try:
+            analyzer_start = time.time()
+            
+            # Pre-analysis setup
+            analyzer.pre_analysis_setup(context)
+            
+            # Filter applicable packets
+            applicable_packets = [
+                p.raw_packet for p in unified_packets 
+                if self._is_packet_applicable(p, analyzer)
+            ]
+            
+            self.logger.info(
+                f"Attempt {attempt}: Running {analyzer.name} on {len(applicable_packets)} applicable packets "
+                f"(out of {len(unified_packets)} total packets)"
+            )
+            
+            # Check for critically low applicable packet count
+            if len(applicable_packets) == 0:
+                result['error'] = "No applicable packets found"
+                result['quality_metrics']['applicable_packet_rate'] = 0.0
+                return result
+            
+            applicable_rate = len(applicable_packets) / len(unified_packets) if unified_packets else 0
+            result['quality_metrics']['applicable_packet_rate'] = applicable_rate
+            
+            # Log concerns about low applicability
+            if applicable_rate < 0.05:  # Less than 5% applicable
+                self.logger.warning(
+                    f"{analyzer.name}: Very low applicability rate ({applicable_rate:.1%}). "
+                    f"Parser may not be extracting {analyzer.name.split()[0].lower()} frames correctly."
+                )
+            
+            # Run analysis
+            findings = analyzer.analyze(applicable_packets, context)
+            
+            # Post-analysis cleanup
+            analyzer.post_analysis_cleanup(context)
+            
+            # Track performance
+            analyzer_time = time.time() - analyzer_start
+            analyzer.processing_time = analyzer_time
+            analyzer.packets_processed = len(applicable_packets)
+            analyzer.findings_generated = len(findings)
+            
+            # Evaluate result quality
+            result['success'] = True
+            result['findings'] = findings
+            result['quality_metrics'].update({
+                'findings_count': len(findings),
+                'processing_time': analyzer_time,
+                'packets_processed': len(applicable_packets)
+            })
+            
+            self.logger.info(
+                f"{analyzer.name}: {len(findings)} findings in {analyzer_time:.2f}s "
+                f"(applicability: {applicable_rate:.1%})"
+            )
             
         except Exception as e:
-            raise PacketParsingError(f"Failed to load PCAP file {pcap_file}: {e}") from e
+            self.logger.error(f"Error in {analyzer.name} attempt {attempt}: {e}")
             
-    def _create_analysis_context(self, pcap_file: str, packets: List[Packet]) -> AnalysisContext:
+            result['error'] = str(e)
+            result['findings'] = [Finding(
+                category=AnalysisCategory.ANOMALY_DETECTION,
+                severity=Severity.ERROR,
+                title=f"Analyzer Error: {analyzer.name}",
+                description=f"Error occurred during analysis attempt {attempt}: {str(e)}",
+                details={
+                    "analyzer": analyzer.name,
+                    "attempt": attempt,
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "parser_used": unified_packets[0].parsing_library if unified_packets else "unknown"
+                },
+                analyzer_name=analyzer.name,
+                analyzer_version=analyzer.version
+            )]
+            
+        return result
+    
+    def _should_retry_with_different_parser(self, result: Dict[str, Any]) -> bool:
+        """
+        Determine if we should retry with a different parser based on result quality.
+        
+        Args:
+            result: Result dictionary from _attempt_analyzer_run
+            
+        Returns:
+            True if we should retry with different parser
+        """
+        # Always retry if the analysis failed completely
+        if not result['success']:
+            return True
+            
+        metrics = result.get('quality_metrics', {})
+        
+        # Retry if applicable packet rate is very low (suggests parser issues)
+        applicable_rate = metrics.get('applicable_packet_rate', 0)
+        if applicable_rate < 0.02:  # Less than 2% applicable packets
+            return True
+            
+        # Retry if zero findings for analyzers that should typically find something
+        findings_count = metrics.get('findings_count', 0)
+        if findings_count == 0:
+            # Some analyzers expected to find issues in typical captures
+            analyzer_name = result['findings'][0].analyzer_name if result['findings'] else ''
+            if any(keyword in analyzer_name.lower() for keyword in 
+                   ['beacon', 'deauth', 'security', 'signal']):
+                return True
+        
+        # Don't retry if results seem reasonable
+        return False
+    
+    def _retry_with_alternative_parsers(
+        self,
+        analyzer: BaseAnalyzer,
+        pcap_file: str,
+        max_packets: Optional[int],
+        context: AnalysisContext,
+        current_library: Optional[str]
+    ) -> List[Finding]:
+        """
+        Retry analysis with alternative parsers.
+        
+        Returns:
+            Best findings from alternative parser attempts
+        """
+        # Get available alternative parsers (excluding current one)
+        available_parsers = self.packet_loader.available_parsers.copy()
+        if current_library in available_parsers:
+            available_parsers.remove(current_library)
+            
+        if not available_parsers:
+            self.logger.warning("No alternative parsers available for retry")
+            return []
+            
+        best_result = None
+        best_score = -1
+        
+        for alt_parser in available_parsers:
+            try:
+                self.logger.info(f"Retrying {analyzer.name} with {alt_parser} parser")
+                
+                # Create temporary packet loader for this parser
+                temp_loader = UnifiedPacketLoader(prefer_library=alt_parser)
+                
+                # Load packets with alternative parser
+                alt_packets, alt_metadata = temp_loader.load_packets(pcap_file, max_packets)
+                
+                current_packet_count = self.packet_loader.stats.get('total_packets_loaded', 0)
+                self.logger.info(
+                    f"Alternative parser {alt_parser} loaded {len(alt_packets)} packets "
+                    f"(vs {current_packet_count} with {current_library})"
+                )
+                
+                # Attempt analysis with alternative packets
+                alt_result = self._attempt_analyzer_run(analyzer, alt_packets, context, attempt=2)
+                
+                # Score this result
+                score = self._score_analysis_result(alt_result, alt_parser)
+                
+                if score > best_score:
+                    best_score = score
+                    best_result = alt_result
+                    
+                    self.logger.info(
+                        f"{analyzer.name} with {alt_parser}: score={score:.1f}, "
+                        f"findings={alt_result['quality_metrics'].get('findings_count', 0)}, "
+                        f"applicability={alt_result['quality_metrics'].get('applicable_packet_rate', 0):.1%}"
+                    )
+                    
+            except Exception as e:
+                self.logger.warning(f"Failed to retry {analyzer.name} with {alt_parser}: {e}")
+                continue
+        
+        if best_result and best_score > 0:
+            # Track successful parser switch
+            alt_parser = available_parsers[0]  # We'll determine which was best from the result
+            switch_key = f"{current_library} -> {alt_parser}"
+            self.retry_stats['parser_switches'][switch_key] = self.retry_stats['parser_switches'].get(switch_key, 0) + 1
+            
+            self.logger.info(f"{analyzer.name}: Using results from alternative parser (score: {best_score:.1f})")
+            return best_result['findings']
+        else:
+            self.logger.warning(f"{analyzer.name}: No alternative parser produced better results")
+            return []
+    
+    def _score_analysis_result(self, result: Dict[str, Any], parser_name: str) -> float:
+        """
+        Score analysis result quality to compare different parser attempts.
+        
+        Returns:
+            Score (higher = better)
+        """
+        if not result['success']:
+            return -1.0
+            
+        metrics = result['quality_metrics']
+        score = 0.0
+        
+        # Higher score for more applicable packets (suggests better parsing)
+        applicable_rate = metrics.get('applicable_packet_rate', 0)
+        score += applicable_rate * 50  # Up to 50 points for 100% applicability
+        
+        # Higher score for finding results (suggests working analysis)
+        findings_count = metrics.get('findings_count', 0)
+        if findings_count > 0:
+            score += min(findings_count * 2, 20)  # Up to 20 points for findings
+        
+        # Reasonable processing time (not too slow)
+        processing_time = metrics.get('processing_time', float('inf'))
+        if processing_time < 10:  # Under 10 seconds is good
+            score += 10
+        elif processing_time < 30:  # Under 30 seconds is okay
+            score += 5
+            
+        # Bonus points for parsers known to be good for certain analysis types
+        if parser_name == 'pyshark':
+            score += 5  # Generally comprehensive
+        elif parser_name == 'scapy':
+            score += 3  # Good balance
+        
+        return score
+            
+    def _create_analysis_context(self, pcap_file: str, unified_packets: List[UnifiedPacketInfo]) -> AnalysisContext:
         """
         Create analysis context from packets.
         
         Args:
             pcap_file: Path to PCAP file
-            packets: List of packets
+            unified_packets: List of unified packets
             
         Returns:
             Analysis context
         """
-        if not packets:
+        if not unified_packets:
             return AnalysisContext(
                 pcap_file=pcap_file,
                 packet_count=0,
@@ -331,22 +668,8 @@ class WirelessPCAPAnalyzer:
                 config=self.config
             )
             
-        # Extract timing info safely
-        timestamps = []
-        for packet in packets:
-            try:
-                if hasattr(packet, 'time'):
-                    time_val = packet.time
-                    # Handle Scapy's EDecimal objects
-                    if hasattr(time_val, '__float__'):
-                        timestamps.append(float(time_val))
-                    elif hasattr(time_val, 'val'):
-                        timestamps.append(float(time_val.val))
-                    else:
-                        timestamps.append(float(time_val))
-            except (ValueError, TypeError, AttributeError) as e:
-                self.logger.debug(f"Error extracting timestamp: {e}")
-                continue
+        # Extract timing info from unified packets
+        timestamps = [p.timestamp for p in unified_packets if p.timestamp > 0]
                 
         if timestamps:
             start_time = min(timestamps)
@@ -357,41 +680,68 @@ class WirelessPCAPAnalyzer:
             
         context = AnalysisContext(
             pcap_file=pcap_file,
-            packet_count=len(packets),
+            packet_count=len(unified_packets),
             start_time=start_time,
             end_time=end_time,
             duration=duration,
             config=self.config
         )
         
-        # Pre-populate network entities safely
+        # Pre-populate network entities from unified packets
         try:
-            self._extract_network_entities(packets, context)
+            self._extract_network_entities_unified(unified_packets, context)
         except Exception as e:
             self.logger.warning(f"Error extracting network entities: {e}")
             
         return context
         
-    def _extract_network_entities(self, packets: List[Packet], context: AnalysisContext) -> None:
+    def _extract_network_entities_unified(self, unified_packets: List[UnifiedPacketInfo], context: AnalysisContext) -> None:
         """
-        Extract network entities from packets.
+        Extract network entities from unified packets.
         
         Args:
-            packets: List of packets
+            unified_packets: List of unified packets
             context: Analysis context to populate
         """
-        # Use packet analyzer utility to extract entities
-        entities = self.packet_analyzer.extract_network_entities(packets)
+        entities = {}
         
-        for entity in entities:
+        for packet in unified_packets:
+            # Create entities from available address information
+            if packet.src_mac:
+                if packet.src_mac not in entities:
+                    entity_type = 'ap' if packet.frame_name == 'beacon' else 'sta'
+                    entities[packet.src_mac] = NetworkEntity(
+                        mac_address=packet.src_mac,
+                        entity_type=entity_type
+                    )
+                    
+                # Update entity with packet info
+                entity = entities[packet.src_mac]
+                if packet.timestamp > 0:
+                    from datetime import datetime
+                    timestamp_dt = datetime.fromtimestamp(packet.timestamp)
+                    if entity.first_seen is None:
+                        entity.first_seen = timestamp_dt
+                    entity.last_seen = timestamp_dt
+                    
+                # Add capabilities from unified packet
+                if packet.ssid:
+                    entity.capabilities['ssid'] = packet.ssid
+                if packet.channel:
+                    entity.capabilities['channel'] = packet.channel
+                if packet.beacon_interval:
+                    entity.capabilities['beacon_interval'] = packet.beacon_interval
+                    
+        # Add entities to context
+        for entity in entities.values():
             context.add_entity(entity)
             
-    def _gather_basic_metrics(self, packets: List[Packet], context: AnalysisContext) -> AnalysisMetrics:
+    def _gather_basic_metrics(self, unified_packets: List[UnifiedPacketInfo], context: AnalysisContext) -> AnalysisMetrics:
         """
         Gather basic metrics from packets.
         
         Args:
-            packets: List of packets
+            unified_packets: List of unified packets
             context: Analysis context
             
         Returns:
@@ -400,36 +750,86 @@ class WirelessPCAPAnalyzer:
         metrics = AnalysisMetrics()
         
         # Basic counts
-        metrics.total_packets = len(packets)
+        metrics.total_packets = len(unified_packets)
         metrics.capture_duration_seconds = context.duration
         
-        # Use packet analyzer to get detailed metrics
-        detailed_metrics = self.packet_analyzer.analyze_packet_distribution(packets)
+        # Count frame types from unified packets
+        frame_counts = {}
+        management_subtypes = {}
+        rssi_values = []
+        channels = set()
+        ssids = set()
+        fcs_errors = 0
+        retry_frames = 0
         
-        # Update metrics object
-        metrics.management_frames = detailed_metrics.get('management_frames', 0)
-        metrics.control_frames = detailed_metrics.get('control_frames', 0)
-        metrics.data_frames = detailed_metrics.get('data_frames', 0)
+        for packet in unified_packets:
+            # Frame type counting
+            frame_name = packet.frame_name
+            frame_counts[frame_name] = frame_counts.get(frame_name, 0) + 1
+            
+            # Management frame subcounting
+            if packet.frame_type == 0:  # Management
+                metrics.management_frames += 1
+                if frame_name == 'beacon':
+                    metrics.beacon_frames += 1
+                elif frame_name == 'probe_request':
+                    metrics.probe_requests += 1
+                elif frame_name == 'probe_response':
+                    metrics.probe_responses += 1
+                elif frame_name == 'authentication':
+                    metrics.auth_frames += 1
+                elif frame_name in ['association_request', 'association_response']:
+                    metrics.assoc_frames += 1
+                elif frame_name == 'deauthentication':
+                    metrics.deauth_frames += 1
+                elif frame_name == 'disassociation':
+                    metrics.disassoc_frames += 1
+            elif packet.frame_type == 1:  # Control
+                metrics.control_frames += 1
+            elif packet.frame_type == 2:  # Data
+                metrics.data_frames += 1
+                
+            # Collect other metrics
+            if packet.rssi is not None:
+                rssi_values.append(packet.rssi)
+            if packet.channel:
+                channels.add(packet.channel)
+            if packet.ssid:
+                ssids.add(packet.ssid)
+            if packet.fcs_bad:
+                fcs_errors += 1
+            if packet.retry:
+                retry_frames += 1
+                
+        # Update metrics
+        metrics.fcs_errors = fcs_errors
+        metrics.retry_frames = retry_frames
+        metrics.channels_observed = channels
+        metrics.unique_ssids = len(ssids)
         
-        metrics.beacon_frames = detailed_metrics.get('beacon_frames', 0)
-        metrics.probe_requests = detailed_metrics.get('probe_requests', 0)
-        metrics.probe_responses = detailed_metrics.get('probe_responses', 0)
-        metrics.auth_frames = detailed_metrics.get('auth_frames', 0)
-        metrics.assoc_frames = detailed_metrics.get('assoc_frames', 0)
-        metrics.deauth_frames = detailed_metrics.get('deauth_frames', 0)
-        metrics.disassoc_frames = detailed_metrics.get('disassoc_frames', 0)
-        metrics.eapol_frames = detailed_metrics.get('eapol_frames', 0)
-        
-        metrics.fcs_errors = detailed_metrics.get('fcs_errors', 0)
-        metrics.retry_frames = detailed_metrics.get('retry_frames', 0)
-        
+        # Network entities from context
         metrics.unique_aps = len([e for e in context.network_entities.values() 
                                 if e.entity_type == 'ap'])
         metrics.unique_stations = len([e for e in context.network_entities.values() 
                                      if e.entity_type == 'sta'])
         
-        metrics.channels_observed = set(detailed_metrics.get('channels', []))
-        metrics.frequency_bands = set(detailed_metrics.get('bands', []))
+        # RSSI statistics
+        if rssi_values:
+            metrics.average_rssi = sum(rssi_values) / len(rssi_values)
+            if len(rssi_values) > 1:
+                import statistics
+                metrics.rssi_std_dev = statistics.stdev(rssi_values)
+        
+        # Determine frequency bands from channels
+        bands = set()
+        for channel in channels:
+            if 1 <= channel <= 14:
+                bands.add("2.4GHz")
+            elif 36 <= channel <= 165:
+                bands.add("5GHz")
+            elif channel > 200:
+                bands.add("6GHz")
+        metrics.frequency_bands = bands
         
         # Timing
         if context.start_time > 0:
@@ -520,6 +920,28 @@ class WirelessPCAPAnalyzer:
                 perf['average_packets_per_run'] = perf['total_packets'] / perf['total_runs']
                 perf['average_findings_per_run'] = perf['total_findings'] / perf['total_runs']
                 
+        return stats
+    
+    def get_adaptive_retry_stats(self) -> Dict[str, Any]:
+        """
+        Get adaptive retry statistics.
+        
+        Returns:
+            Dictionary with retry performance metrics
+        """
+        stats = self.retry_stats.copy()
+        
+        # Calculate percentages
+        if stats['total_analyzers_run'] > 0:
+            stats['retry_rate'] = (stats['analyzers_retried'] / stats['total_analyzers_run']) * 100
+            if stats['analyzers_retried'] > 0:
+                stats['retry_success_rate'] = (stats['successful_retries'] / stats['analyzers_retried']) * 100
+            else:
+                stats['retry_success_rate'] = 0
+        else:
+            stats['retry_rate'] = 0
+            stats['retry_success_rate'] = 0
+            
         return stats
         
     def generate_report(
