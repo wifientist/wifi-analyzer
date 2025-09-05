@@ -1,7 +1,8 @@
 """
-Probe Behavior Analysis for wireless PCAP data.
+Scapy-based Probe Behavior Analysis for wireless PCAP data.
 
-This analyzer provides comprehensive probe request behavior analysis including:
+This analyzer provides comprehensive probe request behavior analysis using native Scapy
+packet parsing including:
 - Client probe request pattern analysis
 - Top probers identification and characterization
 - Wildcard vs directed probe request analysis
@@ -23,16 +24,11 @@ import logging
 from scapy.all import Packet
 from scapy.layers.dot11 import (
     Dot11, Dot11ProbeReq, Dot11ProbeResp, Dot11Elt,
-    Dot11EltRates, Dot11EltDSSSet
+    Dot11EltRates, Dot11EltDSSSet, RadioTap
 )
-from scapy.layers.dot11 import RadioTap
 
-from ...core.base_analyzer import BaseAnalyzer
-from ...utils.analyzer_helpers import (
-    packet_has_layer, get_packet_layer, get_packet_field,
-    get_src_mac, get_dst_mac, get_bssid, get_timestamp
-)
-from ...core.models import (
+from ....core.base_analyzer import BaseScapyAnalyzer
+from ....core.models import (
     Finding, 
     Severity, 
     AnalysisContext,
@@ -102,11 +98,12 @@ class ProbeSequencePattern:
     confidence: float  # Pattern confidence score
 
 
-class ProbeBehaviorAnalyzer(BaseAnalyzer):
+class ScapyProbeBehaviorAnalyzer(BaseScapyAnalyzer):
     """
-    Comprehensive Probe Behavior Analyzer.
+    Scapy-based Comprehensive Probe Behavior Analyzer.
     
-    This analyzer examines client probe request behavior to identify:
+    This analyzer examines client probe request behavior using native Scapy packet
+    parsing to identify:
     - Privacy leaks through SSID exposure
     - Excessive or anomalous probing patterns
     - Client fingerprinting characteristics
@@ -115,13 +112,13 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
     
     def __init__(self):
         super().__init__(
-            name="Probe Behavior Analyzer",
+            name="Scapy Probe Behavior Analyzer",
             category=AnalysisCategory.PROBE_BEHAVIOR,
             version="1.0"
         )
         
         self.description = (
-            "Analyzes client probe request behavior for privacy leaks, "
+            "Analyzes client probe request behavior using Scapy for privacy leaks, "
             "excessive probing, and behavioral patterns"
         )
         
@@ -162,7 +159,7 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
 
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is a probe request."""
-        return packet_has_layer(packet, Dot11ProbeReq)
+        return packet.haslayer(Dot11ProbeReq)
         
     def get_display_filters(self) -> List[str]:
         """Get Wireshark display filters for probe analysis."""
@@ -170,7 +167,7 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
         
     def analyze(self, packets: List[Packet], context: AnalysisContext) -> List[Finding]:
         """
-        Analyze probe request behavior patterns.
+        Analyze probe request behavior patterns using Scapy.
         
         Args:
             packets: List of probe request packets
@@ -182,7 +179,7 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
         if not packets:
             return []
             
-        self.logger.info(f"Analyzing probe behavior from {len(packets)} probe request frames")
+        self.logger.info(f"Analyzing probe behavior from {len(packets)} probe request frames using Scapy")
         
         # Extract probe requests
         self._extract_probe_requests(packets)
@@ -220,14 +217,14 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
         return findings
         
     def _extract_probe_requests(self, packets: List[Packet]) -> None:
-        """Extract probe request information from packets."""
+        """Extract probe request information from packets using Scapy."""
         for packet in packets:
             try:
-                if not packet_has_layer(packet, Dot11ProbeReq):
+                if not packet.haslayer(Dot11ProbeReq):
                     continue
                     
-                dot11 = get_packet_layer(packet, "Dot11")
-                probe_req = get_packet_layer(packet, "Dot11ProbeReq")
+                dot11 = packet[Dot11]
+                probe_req = packet[Dot11ProbeReq]
                 
                 # Extract basic information
                 client_mac = dot11.addr2 if dot11.addr2 else "unknown"
@@ -235,13 +232,7 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                     continue
                     
                 # Get packet timestamp
-                timestamp = get_timestamp(packet) if hasattr(packet, 'time') else 0
-                if hasattr(timestamp, '__float__'):
-                    timestamp = float(timestamp)
-                elif hasattr(timestamp, 'val'):
-                    timestamp = float(timestamp.val)
-                else:
-                    timestamp = float(timestamp)
+                timestamp = float(packet.time) if hasattr(packet, 'time') else 0
                 
                 # Extract SSID from Information Elements
                 target_ssid = ""
@@ -251,8 +242,8 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                 vendor_ies = {}
                 channel = None
                 
-                if packet_has_layer(packet, Dot11Elt):
-                    current_ie = get_packet_layer(packet, "Dot11Elt")
+                if packet.haslayer(Dot11Elt):
+                    current_ie = packet[Dot11Elt]
                     while current_ie:
                         ie_id = current_ie.ID
                         ie_data = bytes(current_ie.info) if current_ie.info else b''
@@ -281,8 +272,8 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                 
                 # Extract RSSI from RadioTap
                 rssi = None
-                if packet_has_layer(packet, RadioTap):
-                    radiotap = get_packet_layer(packet, "RadioTap")
+                if packet.haslayer(RadioTap):
+                    radiotap = packet[RadioTap]
                     if hasattr(radiotap, 'dBm_AntSignal'):
                         rssi = radiotap.dBm_AntSignal
                 
@@ -600,10 +591,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
         ]
         
         if excessive_probers:
-            findings.append(Finding(
-                category=AnalysisCategory.PROBE_BEHAVIOR,
+            findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="High-Volume Probing Clients Detected",
+                title="High-Volume Probing Clients Detected (Scapy)",
                 description=f"Found {len(excessive_probers)} clients with high probe activity",
                 details={
                     "top_probers": [
@@ -617,18 +607,16 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                         }
                         for mac, profile in excessive_probers[:5]
                     ],
-                    "analysis_impact": "High probe volumes may indicate scanning tools or misconfigured clients"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    "analysis_impact": "High probe volumes may indicate scanning tools or misconfigured clients",
+                    "parser": "scapy"
+                }
             ))
             
         # Overall probe activity summary
         total_probes = sum(profile.total_probes for _, profile in self.client_profiles.items())
-        findings.append(Finding(
-            category=AnalysisCategory.PROBE_BEHAVIOR,
+        findings.append(self.create_finding(
             severity=Severity.INFO,
-            title="Probe Activity Summary",
+            title="Probe Activity Summary (Scapy)",
             description=f"Analyzed probe behavior from {len(self.client_profiles)} unique clients",
             details={
                 "total_probe_requests": total_probes,
@@ -641,10 +629,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                         "vendor_oui": profile.vendor_oui
                     }
                     for mac, profile in top_probers[:5]
-                ]
-            },
-            analyzer_name=self.name,
-            analyzer_version=self.version
+                ],
+                "parser": "scapy"
+            }
         ))
             
         return findings
@@ -663,10 +650,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                 high_rate_clients.append((mac, profile))
         
         if excessive_rate_clients:
-            findings.append(Finding(
-                category=AnalysisCategory.PROBE_BEHAVIOR,
+            findings.append(self.create_finding(
                 severity=Severity.CRITICAL,
-                title="Excessive Probe Request Rates",
+                title="Excessive Probe Request Rates (Scapy)",
                 description=f"Found {len(excessive_rate_clients)} clients with excessive probe rates",
                 details={
                     "excessive_clients": [
@@ -681,17 +667,15 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                         for mac, profile in excessive_rate_clients
                     ],
                     "threshold": self.EXCESSIVE_PROBE_RATE,
-                    "recommendation": "Investigate these clients for potential security issues"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    "recommendation": "Investigate these clients for potential security issues",
+                    "parser": "scapy"
+                }
             ))
         
         if high_rate_clients:
-            findings.append(Finding(
-                category=AnalysisCategory.PROBE_BEHAVIOR,
+            findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="High Probe Request Rates",
+                title="High Probe Request Rates (Scapy)",
                 description=f"Found {len(high_rate_clients)} clients with high probe rates",
                 details={
                     "high_rate_clients": [
@@ -704,10 +688,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                         for mac, profile in high_rate_clients
                     ],
                     "threshold": self.HIGH_PROBE_RATE,
-                    "note": "Monitor for potential performance impact"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    "note": "Monitor for potential performance impact",
+                    "parser": "scapy"
+                }
             ))
                 
         return findings
@@ -726,10 +709,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
             # Sort by number of exposed SSIDs
             high_exposure_clients.sort(key=lambda x: len(x[1].unique_ssids), reverse=True)
             
-            findings.append(Finding(
-                category=AnalysisCategory.PROBE_BEHAVIOR,
+            findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="SSID Leakage and PNL Exposure",
+                title="SSID Leakage and PNL Exposure (Scapy)",
                 description=f"Found {len(high_exposure_clients)} clients exposing multiple SSIDs",
                 details={
                     "exposed_clients": [
@@ -744,19 +726,17 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                         for mac, profile in high_exposure_clients[:10]
                     ],
                     "privacy_impact": "Exposed SSIDs reveal user location history and behavior",
-                    "recommendation": "Enable MAC randomization and disable auto-connect for untrusted networks"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    "recommendation": "Enable MAC randomization and disable auto-connect for untrusted networks",
+                    "parser": "scapy"
+                }
             ))
         
         # Analyze most commonly probed SSIDs
         if self.ssid_popularity:
             top_ssids = self.ssid_popularity.most_common(10)
-            findings.append(Finding(
-                category=AnalysisCategory.PROBE_BEHAVIOR,
+            findings.append(self.create_finding(
                 severity=Severity.INFO,
-                title="Most Frequently Probed SSIDs",
+                title="Most Frequently Probed SSIDs (Scapy)",
                 description=f"Analysis of {len(self.ssid_popularity)} unique SSIDs in probe requests",
                 details={
                     "top_ssids": [
@@ -764,10 +744,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                         for ssid, count in top_ssids
                     ],
                     "total_unique_ssids": len(self.ssid_popularity),
-                    "note": "Popular SSIDs may indicate common networks or honeypots"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    "note": "Popular SSIDs may indicate common networks or honeypots",
+                    "parser": "scapy"
+                }
             ))
                 
         return findings
@@ -796,10 +775,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                 directed_only_clients.append((mac, profile))
         
         # Overall probe behavior analysis
-        findings.append(Finding(
-            category=AnalysisCategory.PROBE_BEHAVIOR,
+        findings.append(self.create_finding(
             severity=Severity.INFO,
-            title="Probe Request Behavior Analysis",
+            title="Probe Request Behavior Analysis (Scapy)",
             description=f"Analysis of wildcard vs directed probe request patterns",
             details={
                 "total_probes": total_probes,
@@ -809,17 +787,15 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                 "behavior_implications": {
                     "high_wildcard": "May indicate scanning or discovery tools",
                     "high_directed": "Suggests specific network targeting or saved networks"
-                }
-            },
-            analyzer_name=self.name,
-            analyzer_version=self.version
+                },
+                "parser": "scapy"
+            }
         ))
         
         if wildcard_heavy_clients:
-            findings.append(Finding(
-                category=AnalysisCategory.PROBE_BEHAVIOR,
+            findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="Wildcard-Heavy Probing Clients",
+                title="Wildcard-Heavy Probing Clients (Scapy)",
                 description=f"Found {len(wildcard_heavy_clients)} clients using primarily wildcard probes",
                 details={
                     "wildcard_clients": [
@@ -832,10 +808,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                         }
                         for mac, profile, ratio in wildcard_heavy_clients[:10]
                     ],
-                    "security_note": "Excessive wildcard probing may indicate reconnaissance"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    "security_note": "Excessive wildcard probing may indicate reconnaissance",
+                    "parser": "scapy"
+                }
             ))
                 
         return findings
@@ -854,10 +829,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
         
         for pattern_type, patterns in pattern_types.items():
             if pattern_type == "burst":
-                findings.append(Finding(
-                    category=AnalysisCategory.PROBE_BEHAVIOR,
+                findings.append(self.create_finding(
                     severity=Severity.WARNING,
-                    title="Probe Burst Patterns Detected",
+                    title="Probe Burst Patterns Detected (Scapy)",
                     description=f"Found {len(patterns)} clients exhibiting probe burst behavior",
                     details={
                         "burst_clients": [
@@ -869,16 +843,14 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                             }
                             for p in patterns[:10]
                         ],
-                        "pattern_analysis": "Burst patterns may indicate automated scanning or rapid network discovery"
-                    },
-                    analyzer_name=self.name,
-                    analyzer_version=self.version
+                        "pattern_analysis": "Burst patterns may indicate automated scanning or rapid network discovery",
+                        "parser": "scapy"
+                    }
                 ))
             elif pattern_type == "periodic":
-                findings.append(Finding(
-                    category=AnalysisCategory.PROBE_BEHAVIOR,
+                findings.append(self.create_finding(
                     severity=Severity.INFO,
-                    title="Periodic Probe Patterns Detected", 
+                    title="Periodic Probe Patterns Detected (Scapy)", 
                     description=f"Found {len(patterns)} clients with periodic probing behavior",
                     details={
                         "periodic_clients": [
@@ -890,10 +862,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                             }
                             for p in patterns[:10]
                         ],
-                        "note": "Periodic patterns are typical for normal client behavior"
-                    },
-                    analyzer_name=self.name,
-                    analyzer_version=self.version
+                        "note": "Periodic patterns are typical for normal client behavior",
+                        "parser": "scapy"
+                    }
                 ))
                 
         return findings
@@ -911,10 +882,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
         exposure_rate = (clients_with_exposure / total_clients * 100) if total_clients > 0 else 0
         randomization_rate = (randomized_clients / total_clients * 100) if total_clients > 0 else 0
         
-        findings.append(Finding(
-            category=AnalysisCategory.PROBE_BEHAVIOR,
+        findings.append(self.create_finding(
             severity=Severity.WARNING if exposure_rate > 50 else Severity.INFO,
-            title="Privacy Risk Assessment",
+            title="Privacy Risk Assessment (Scapy)",
             description=f"Privacy analysis of client probe behavior patterns",
             details={
                 "total_clients_analyzed": total_clients,
@@ -928,10 +898,9 @@ class ProbeBehaviorAnalyzer(BaseAnalyzer):
                     "Regularly clear saved network list",
                     "Use directed probes only when necessary"
                 ],
-                "risk_assessment": "HIGH" if exposure_rate > 70 else "MEDIUM" if exposure_rate > 30 else "LOW"
-            },
-            analyzer_name=self.name,
-            analyzer_version=self.version
+                "risk_assessment": "HIGH" if exposure_rate > 70 else "MEDIUM" if exposure_rate > 30 else "LOW",
+                "parser": "scapy"
+            }
         ))
             
         return findings

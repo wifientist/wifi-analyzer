@@ -1,7 +1,8 @@
 """
-Capture quality analysis and validation for wireless PCAP data.
+PyShark-based capture quality analysis and validation for wireless PCAP data.
 
-This analyzer validates the quality and completeness of wireless packet captures:
+This analyzer validates the quality and completeness of wireless packet captures using
+native PyShark packet parsing:
 - Monitor mode detection and validation
 - Timing accuracy and consistency checks
 - FCS (Frame Check Sequence) inclusion validation
@@ -15,17 +16,16 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Set, Tuple, Optional
 
-from scapy.all import Packet
-from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11ProbeResp, Dot11ProbeReq, Dot11Auth, Dot11Deauth
-from scapy.layers.dot11 import Dot11AssoReq, Dot11AssoResp, Dot11ReassoReq, Dot11ReassoResp, Dot11Disas
-from scapy.layers.dot11 import Dot11QoS, Dot11CCMP, Dot11WEP
+try:
+    import pyshark
+    from pyshark.packet.packet import Packet as PySharkPacket
+    PYSHARK_AVAILABLE = True
+except ImportError:
+    PYSHARK_AVAILABLE = False
+    PySharkPacket = None
 
-from ...core.base_analyzer import BaseAnalyzer
-from ...utils.analyzer_helpers import (
-    packet_has_layer, get_packet_layer, get_packet_field,
-    get_src_mac, get_dst_mac, get_bssid, get_timestamp
-)
-from ...core.models import (
+from ....core.base_analyzer import BasePySharkAnalyzer
+from ....core.models import (
     Finding, 
     Severity, 
     AnalysisContext,
@@ -35,27 +35,27 @@ from ...core.models import (
 )
 
 
-class CaptureQualityAnalyzer(BaseAnalyzer):
+class PySharkCaptureQualityAnalyzer(BasePySharkAnalyzer):
     """
-    Comprehensive capture quality and validation analyzer.
+    PyShark-based comprehensive capture quality and validation analyzer.
     
     This analyzer assesses the quality and completeness of wireless packet captures
-    to ensure reliable analysis results. It validates:
+    using native PyShark packet parsing to ensure reliable analysis results. It validates:
     - Monitor mode operation
     - Timing accuracy and consistency
     - FCS inclusion and validation
     - Hardware/driver capabilities
     - Capture setup and configuration
-    - RadioTap header quality
+    - RadioTap header presence and quality
     """
     
     def __init__(self):
         super().__init__(
-            name="Capture Quality Validator",
+            name="PyShark Capture Quality Validator",
             category=AnalysisCategory.CAPTURE_QUALITY,
             version="1.0"
         )
-        self.description = "Validates monitor mode, timing, FCS inclusion, and capture integrity"
+        self.description = "Validates monitor mode, timing, FCS inclusion, and capture integrity using PyShark"
         self.analysis_order = 50  # Run early to validate capture quality
         
         # Quality thresholds
@@ -114,13 +114,13 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         self.reset_analysis_state()
         self.logger.info(f"Starting {self.name} analysis")
         
-    def is_applicable(self, packet: Packet) -> bool:
+    def is_applicable(self, packet: PySharkPacket) -> bool:
         """All packets are applicable for quality analysis."""
-        return True
+        return PYSHARK_AVAILABLE and packet is not None
         
-    def analyze(self, packets: List[Packet], context: AnalysisContext) -> List[Finding]:
+    def analyze(self, packets: List[PySharkPacket], context: AnalysisContext) -> List[Finding]:
         """
-        Analyze packets for capture quality and integrity.
+        Analyze packets for capture quality and integrity using PyShark.
         
         Args:
             packets: List of packets to analyze
@@ -129,6 +129,10 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         Returns:
             List of findings
         """
+        if not PYSHARK_AVAILABLE:
+            self.logger.warning("PyShark is not available, skipping analysis")
+            return []
+            
         findings = []
         
         if not packets:
@@ -142,7 +146,7 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
             ))
             return findings
             
-        self.logger.info(f"Analyzing capture quality of {len(packets)} packets")
+        self.logger.info(f"Analyzing capture quality of {len(packets)} packets using PyShark")
         self.total_packets = len(packets)
         
         # Collect quality metrics
@@ -161,8 +165,8 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         self.logger.info(f"Generated {len(findings)} capture quality findings")
         return findings
         
-    def _collect_quality_metrics(self, packets: List[Packet]) -> None:
-        """Collect quality metrics from all packets."""
+    def _collect_quality_metrics(self, packets: List[PySharkPacket]) -> None:
+        """Collect quality metrics from all packets using PyShark."""
         packet_signatures = []
         
         for i, packet in enumerate(packets):
@@ -179,7 +183,7 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
                 self._analyze_radiotap_header(packet)
                 
                 # Analyze 802.11 frame if present
-                if packet_has_layer(packet, Dot11):
+                if hasattr(packet, 'wlan') and packet.wlan:
                     self._analyze_dot11_frame(packet, i)
                     
                 # Check for duplicates (simple hash-based)
@@ -206,45 +210,49 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
                 interval = self.timestamps[i] - self.timestamps[i-1]
                 self.timestamp_intervals.append(interval)
                 
-    def _analyze_radiotap_header(self, packet: Packet) -> None:
-        """Analyze RadioTap header presence and quality."""
-        # Check if packet has RadioTap-like attributes
-        radiotap_fields = [
-            'dBm_AntSignal', 'dBm_AntNoise', 'Channel', 'Rate', 'Antenna',
-            'present', 'len', 'datarate', 'MCS_index', 'VHT_NSS'
-        ]
-        
-        has_radiotap = False
-        for field in radiotap_fields:
-            if hasattr(packet, field):
-                has_radiotap = True
-                self.radiotap_features[field] += 1
-                
-        if has_radiotap:
+    def _analyze_radiotap_header(self, packet: PySharkPacket) -> None:
+        """Analyze RadioTap header presence and quality using PyShark."""
+        if hasattr(packet, 'radiotap') and packet.radiotap:
             self.radiotap_present_count += 1
+            radiotap = packet.radiotap
             
-        # Collect antenna information
-        if hasattr(packet, 'Antenna'):
-            try:
-                antenna_id = int(packet.Antenna)
-                self.antenna_info[antenna_id] += 1
-            except (ValueError, TypeError):
-                pass
+            # Check available RadioTap fields
+            radiotap_fields = [
+                'dbm_antsignal', 'dbm_antnoise', 'channel', 'datarate', 'antenna',
+                'present', 'length', 'mcs_index', 'vht_nss'
+            ]
+            
+            for field in radiotap_fields:
+                if hasattr(radiotap, field):
+                    self.radiotap_features[field] += 1
+                    
+            # Collect antenna information
+            if hasattr(radiotap, 'antenna'):
+                try:
+                    antenna_id = int(radiotap.antenna)
+                    self.antenna_info[antenna_id] += 1
+                except (ValueError, TypeError):
+                    pass
                 
-    def _analyze_dot11_frame(self, packet: Packet, packet_index: int) -> None:
-        """Analyze 802.11 frame for quality indicators."""
-        dot11 = get_packet_layer(packet, "Dot11")
+    def _analyze_dot11_frame(self, packet: PySharkPacket, packet_index: int) -> None:
+        """Analyze 802.11 frame for quality indicators using PyShark."""
+        if not hasattr(packet, 'wlan') or not packet.wlan:
+            return
+            
+        wlan = packet.wlan
         
         # Count frame types
-        frame_type = dot11.type
-        frame_subtype = dot11.subtype
-        
-        self.frame_type_stats[frame_type] += 1
-        self.frame_subtype_stats[frame_type][frame_subtype] += 1
-        
-        # Count management frames for monitor mode detection
-        if frame_type == 0:  # Management frame
-            self.management_frame_count += 1
+        if hasattr(wlan, 'fc_type'):
+            frame_type = int(wlan.fc_type)
+            self.frame_type_stats[frame_type] += 1
+            
+            if hasattr(wlan, 'fc_subtype'):
+                frame_subtype = int(wlan.fc_subtype)
+                self.frame_subtype_stats[frame_type][frame_subtype] += 1
+            
+            # Count management frames for monitor mode detection
+            if frame_type == 0:  # Management frame
+                self.management_frame_count += 1
             
         # Check for FCS
         self._check_fcs_presence(packet)
@@ -252,74 +260,77 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         # Monitor mode indicators
         self._check_monitor_mode_indicators(packet)
         
-    def _check_fcs_presence(self, packet: Packet) -> None:
-        """Check for FCS presence and validity."""
-        # Look for FCS-related attributes
+    def _check_fcs_presence(self, packet: PySharkPacket) -> None:
+        """Check for FCS presence and validity using PyShark."""
+        # Look for FCS-related attributes in PyShark packet
         has_fcs = False
         fcs_valid = False
         
-        # Common FCS indicators in different capture formats
-        fcs_fields = ['fcs', 'fcs_good', 'fcs_bad', 'FCS']
-        
-        for field in fcs_fields:
-            if hasattr(packet, field):
-                has_fcs = True
-                self.total_packets_with_fcs += 1
-                break
-                
+        # Check for FCS fields in WLAN layer
+        if hasattr(packet, 'wlan') and packet.wlan:
+            wlan = packet.wlan
+            fcs_fields = ['fcs', 'fcs_good', 'fcs_bad']
+            
+            for field in fcs_fields:
+                if hasattr(wlan, field):
+                    has_fcs = True
+                    self.total_packets_with_fcs += 1
+                    break
+                    
         if has_fcs:
             self.fcs_present_count += 1
             
             # Check FCS validity if information is available
-            if hasattr(packet, 'fcs_good') and packet.fcs_good:
-                fcs_valid = True
+            if hasattr(packet.wlan, 'fcs_good') and packet.wlan.fcs_good == '1':
                 self.fcs_valid_count += 1
-            elif hasattr(packet, 'fcs_bad') and packet.fcs_bad:
+            elif hasattr(packet.wlan, 'fcs_bad') and packet.wlan.fcs_bad == '1':
                 self.fcs_invalid_count += 1
-            elif hasattr(packet, 'fcs'):
+            elif hasattr(packet.wlan, 'fcs'):
                 # FCS present but validity unknown
                 self.fcs_valid_count += 1  # Assume valid if present
                 
-    def _check_monitor_mode_indicators(self, packet: Packet) -> None:
-        """Check for indicators that suggest monitor mode operation."""
-        if not packet_has_layer(packet, Dot11):
+    def _check_monitor_mode_indicators(self, packet: PySharkPacket) -> None:
+        """Check for indicators that suggest monitor mode operation using PyShark."""
+        if not hasattr(packet, 'wlan') or not packet.wlan:
             return
             
-        dot11 = get_packet_layer(packet, "Dot11")
+        wlan = packet.wlan
         
         # Strong monitor mode indicators
-        if dot11.type == 0:  # Management frames
-            if dot11.subtype == 8:  # Beacon
-                self.monitor_mode_indicators.append("beacon_frames_present")
-            elif dot11.subtype == 4:  # Probe request
-                self.monitor_mode_indicators.append("probe_requests_present")
-            elif dot11.subtype == 11:  # Authentication
-                self.monitor_mode_indicators.append("auth_frames_present")
-            elif dot11.subtype == 12:  # Deauthentication
-                self.monitor_mode_indicators.append("deauth_frames_present")
-                
+        if hasattr(wlan, 'fc_type') and hasattr(wlan, 'fc_subtype'):
+            frame_type = int(wlan.fc_type)
+            frame_subtype = int(wlan.fc_subtype)
+            
+            if frame_type == 0:  # Management frames
+                if frame_subtype == 8:  # Beacon
+                    self.monitor_mode_indicators.append("beacon_frames_present")
+                elif frame_subtype == 4:  # Probe request
+                    self.monitor_mode_indicators.append("probe_requests_present")
+                elif frame_subtype == 11:  # Authentication
+                    self.monitor_mode_indicators.append("auth_frames_present")
+                elif frame_subtype == 12:  # Deauthentication
+                    self.monitor_mode_indicators.append("deauth_frames_present")
+                    
         # Check for promiscuous capture indicators
-        if hasattr(dot11, 'addr1') and str(dot11.addr1).lower() != 'ff:ff:ff:ff:ff:ff':
+        if hasattr(wlan, 'da') and str(wlan.da).lower() != 'ff:ff:ff:ff:ff:ff':
             # Non-broadcast frames captured suggest monitor mode
             self.monitor_mode_indicators.append("unicast_frames_captured")
             
-    def _collect_hardware_indicators(self, packet: Packet) -> None:
-        """Collect hardware and driver capability indicators."""
-        # Check for specific driver indicators in RadioTap
-        if hasattr(packet, 'present'):
+    def _collect_hardware_indicators(self, packet: PySharkPacket) -> None:
+        """Collect hardware and driver capability indicators using PyShark."""
+        # Check for RadioTap indicators
+        if hasattr(packet, 'radiotap') and packet.radiotap:
             self.driver_indicators.add("radiotap_present")
+            radiotap = packet.radiotap
             
-        # Look for specific hardware capabilities
-        if hasattr(packet, 'MCS_index'):
-            self.hardware_indicators.add("802.11n_capable")
-        if hasattr(packet, 'VHT_NSS'):
-            self.hardware_indicators.add("802.11ac_capable")
-        if hasattr(packet, 'HE_MU'):
-            self.hardware_indicators.add("802.11ax_capable")
+            # Look for specific hardware capabilities
+            if hasattr(radiotap, 'mcs_index'):
+                self.hardware_indicators.add("802.11n_capable")
+            if hasattr(radiotap, 'vht_nss'):
+                self.hardware_indicators.add("802.11ac_capable")
+            if hasattr(radiotap, 'he_mu'):
+                self.hardware_indicators.add("802.11ax_capable")
             
-        # Interface indicators (if available in metadata)
-        # This would typically come from capture file metadata
-        
     def _analyze_monitor_mode(self) -> List[Finding]:
         """Analyze monitor mode detection and quality."""
         findings = []
@@ -333,14 +344,15 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if management_ratio < self.min_management_frames_ratio:
             findings.append(self.create_finding(
                 severity=Severity.CRITICAL,
-                title="Monitor Mode Not Detected",
+                title="Monitor Mode Not Detected (PyShark)",
                 description=f"Only {management_ratio:.1%} management frames detected, suggesting non-monitor mode capture",
                 details={
                     "management_frame_ratio": management_ratio,
                     "management_frame_count": self.management_frame_count,
                     "total_packets": self.total_packets,
                     "minimum_expected_ratio": self.min_management_frames_ratio,
-                    "frame_type_distribution": dict(self.frame_type_stats)
+                    "frame_type_distribution": dict(self.frame_type_stats),
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Verify interface is in monitor mode during capture",
@@ -354,12 +366,13 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         elif management_ratio < 0.15:  # Less than 15% but above minimum
             findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="Low Management Frame Ratio",
+                title="Low Management Frame Ratio (PyShark)",
                 description=f"{management_ratio:.1%} management frames may indicate limited monitor mode capture",
                 details={
                     "management_frame_ratio": management_ratio,
                     "management_frame_count": self.management_frame_count,
-                    "monitor_mode_indicators": list(set(self.monitor_mode_indicators))
+                    "monitor_mode_indicators": list(set(self.monitor_mode_indicators)),
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Verify monitor mode is fully operational",
@@ -374,12 +387,13 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if len(unique_indicators) >= 3:
             findings.append(self.create_finding(
                 severity=Severity.INFO,
-                title="Monitor Mode Confirmed",
+                title="Monitor Mode Confirmed (PyShark)",
                 description=f"Strong monitor mode indicators detected: {len(unique_indicators)} types",
                 details={
                     "monitor_mode_indicators": list(unique_indicators),
                     "management_frame_ratio": management_ratio,
-                    "confidence_level": "high"
+                    "confidence_level": "high",
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Monitor mode appears to be working correctly",
@@ -397,8 +411,9 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if len(self.timestamps) < 10:
             findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="Insufficient Timing Data",
+                title="Insufficient Timing Data (PyShark)",
                 description=f"Only {len(self.timestamps)} timestamped packets available for timing analysis",
+                details={"parser": "pyshark"},
                 recommendations=["Verify capture tool preserves packet timestamps",
                               "Check for capture tool configuration issues"]
             ))
@@ -417,13 +432,14 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if max_interval > 10.0:  # Gaps > 10 seconds
             findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="Large Timing Gaps Detected",
+                title="Large Timing Gaps Detected (PyShark)",
                 description=f"Maximum interval between packets is {max_interval:.2f} seconds",
                 details={
                     "max_interval_seconds": max_interval,
                     "average_interval_seconds": avg_interval,
                     "interval_std_dev": interval_std,
-                    "total_intervals": len(self.timestamp_intervals)
+                    "total_intervals": len(self.timestamp_intervals),
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Check for capture interruptions or pauses",
@@ -438,11 +454,12 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if len(microsecond_timestamps) / len(self.timestamps) > 0.8:
             findings.append(self.create_finding(
                 severity=Severity.INFO,
-                title="High-Precision Timestamps Detected",
+                title="High-Precision Timestamps Detected (PyShark)",
                 description=f"{len(microsecond_timestamps)/len(self.timestamps):.1%} of timestamps have microsecond precision",
                 details={
                     "precision_ratio": len(microsecond_timestamps)/len(self.timestamps),
-                    "total_timestamps": len(self.timestamps)
+                    "total_timestamps": len(self.timestamps),
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "High-precision timestamps improve analysis accuracy",
@@ -455,12 +472,13 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if interval_std > avg_interval * 2 and avg_interval > 0:
             findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="Inconsistent Packet Timing",
+                title="Inconsistent Packet Timing (PyShark)",
                 description=f"High timing variance detected (σ={interval_std:.3f}s, avg={avg_interval:.3f}s)",
                 details={
                     "timing_variance": interval_std,
                     "average_interval": avg_interval,
-                    "variance_ratio": interval_std / avg_interval if avg_interval > 0 else 0
+                    "variance_ratio": interval_std / avg_interval if avg_interval > 0 else 0,
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Check for system load during capture",
@@ -484,13 +502,14 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if fcs_ratio < self.min_fcs_inclusion_ratio:
             findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="Low FCS Inclusion Rate",
+                title="Low FCS Inclusion Rate (PyShark)",
                 description=f"Only {fcs_ratio:.1%} of packets include FCS information",
                 details={
                     "fcs_inclusion_ratio": fcs_ratio,
                     "fcs_present_count": self.fcs_present_count,
                     "total_packets": self.total_packets,
-                    "minimum_expected_ratio": self.min_fcs_inclusion_ratio
+                    "minimum_expected_ratio": self.min_fcs_inclusion_ratio,
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Enable FCS inclusion in capture tool settings",
@@ -504,12 +523,13 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
             # High FCS inclusion is good
             findings.append(self.create_finding(
                 severity=Severity.INFO,
-                title="High FCS Inclusion Rate",
+                title="High FCS Inclusion Rate (PyShark)",
                 description=f"{fcs_ratio:.1%} of packets include FCS information",
                 details={
                     "fcs_inclusion_ratio": fcs_ratio,
                     "fcs_valid_count": self.fcs_valid_count,
-                    "fcs_invalid_count": self.fcs_invalid_count
+                    "fcs_invalid_count": self.fcs_invalid_count,
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Excellent FCS inclusion rate for frame integrity analysis",
@@ -525,12 +545,13 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
             if error_rate > 0.05:  # > 5% FCS errors
                 findings.append(self.create_finding(
                     severity=Severity.WARNING,
-                    title="High FCS Error Rate",
+                    title="High FCS Error Rate (PyShark)",
                     description=f"{error_rate:.1%} of frames have FCS errors",
                     details={
                         "fcs_error_rate": error_rate,
                         "fcs_valid_count": self.fcs_valid_count,
-                        "fcs_invalid_count": self.fcs_invalid_count
+                        "fcs_invalid_count": self.fcs_invalid_count,
+                        "parser": "pyshark"
                     },
                     recommendations=[
                         "High FCS error rate may indicate RF issues",
@@ -554,12 +575,13 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if radiotap_ratio < 0.1:  # Less than 10% have RadioTap
             findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="Limited RadioTap Information",
+                title="Limited RadioTap Information (PyShark)",
                 description=f"Only {radiotap_ratio:.1%} of packets contain RadioTap metadata",
                 details={
                     "radiotap_ratio": radiotap_ratio,
                     "radiotap_present_count": self.radiotap_present_count,
-                    "available_features": dict(self.radiotap_features)
+                    "available_features": dict(self.radiotap_features),
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "RadioTap headers provide valuable RF metadata",
@@ -572,12 +594,13 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         elif radiotap_ratio > 0.8:
             findings.append(self.create_finding(
                 severity=Severity.INFO,
-                title="Rich RadioTap Metadata Available",
+                title="Rich RadioTap Metadata Available (PyShark)",
                 description=f"{radiotap_ratio:.1%} of packets contain RadioTap information",
                 details={
                     "radiotap_ratio": radiotap_ratio,
                     "available_features": dict(self.radiotap_features),
-                    "antenna_diversity": len(self.antenna_info)
+                    "antenna_diversity": len(self.antenna_info),
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Excellent RadioTap coverage enables advanced RF analysis",
@@ -595,12 +618,13 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if self.capture_duration < self.min_capture_duration:
             findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="Very Short Capture Duration",
+                title="Very Short Capture Duration (PyShark)",
                 description=f"Capture duration is only {self.capture_duration:.2f} seconds",
                 details={
                     "capture_duration_seconds": self.capture_duration,
                     "minimum_recommended": self.min_capture_duration,
-                    "total_packets": self.total_packets
+                    "total_packets": self.total_packets,
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Short captures may not represent typical network behavior",
@@ -617,12 +641,13 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
             if packet_rate < 1:  # Less than 1 packet per second
                 findings.append(self.create_finding(
                     severity=Severity.WARNING,
-                    title="Low Packet Capture Rate",
+                    title="Low Packet Capture Rate (PyShark)",
                     description=f"Average packet rate is {packet_rate:.2f} packets/second",
                     details={
                         "packet_rate_per_second": packet_rate,
                         "total_packets": self.total_packets,
-                        "capture_duration": self.capture_duration
+                        "capture_duration": self.capture_duration,
+                        "parser": "pyshark"
                     },
                     recommendations=[
                         "Low packet rate may indicate inactive network",
@@ -634,11 +659,12 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
             elif packet_rate > 1000:  # Very high rate
                 findings.append(self.create_finding(
                     severity=Severity.INFO,
-                    title="High Packet Capture Rate",
+                    title="High Packet Capture Rate (PyShark)",
                     description=f"High packet rate detected: {packet_rate:.0f} packets/second",
                     details={
                         "packet_rate_per_second": packet_rate,
-                        "total_packets": self.total_packets
+                        "total_packets": self.total_packets,
+                        "parser": "pyshark"
                     },
                     recommendations=[
                         "High packet rate indicates active network environment",
@@ -657,11 +683,12 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if self.hardware_indicators:
             findings.append(self.create_finding(
                 severity=Severity.INFO,
-                title="Advanced Hardware Capabilities Detected",
+                title="Advanced Hardware Capabilities Detected (PyShark)",
                 description=f"Hardware supports: {', '.join(self.hardware_indicators)}",
                 details={
                     "hardware_capabilities": list(self.hardware_indicators),
-                    "driver_indicators": list(self.driver_indicators)
+                    "driver_indicators": list(self.driver_indicators),
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Advanced hardware enables comprehensive analysis",
@@ -674,11 +701,12 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if len(self.antenna_info) > 1:
             findings.append(self.create_finding(
                 severity=Severity.INFO,
-                title="Multiple Antenna Support Detected",
+                title="Multiple Antenna Support Detected (PyShark)",
                 description=f"Detected {len(self.antenna_info)} different antennas",
                 details={
                     "antenna_count": len(self.antenna_info),
-                    "antenna_usage": dict(self.antenna_info)
+                    "antenna_usage": dict(self.antenna_info),
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "Multiple antennas can improve signal diversity",
@@ -702,13 +730,14 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if duplicate_ratio > self.max_duplicate_ratio:
             findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="High Duplicate Frame Rate",
+                title="High Duplicate Frame Rate (PyShark)",
                 description=f"{duplicate_ratio:.1%} of frames appear to be duplicates",
                 details={
                     "duplicate_ratio": duplicate_ratio,
                     "duplicate_count": self.duplicate_count,
                     "total_packets": self.total_packets,
-                    "max_expected_ratio": self.max_duplicate_ratio
+                    "max_expected_ratio": self.max_duplicate_ratio,
+                    "parser": "pyshark"
                 },
                 recommendations=[
                     "High duplicate rate may indicate capture issues",
@@ -731,9 +760,9 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         if quality_score < 0.6:
             findings.append(self.create_finding(
                 severity=Severity.CRITICAL,
-                title="Poor Capture Quality Detected",
+                title="Poor Capture Quality Detected (PyShark)",
                 description=f"Overall capture quality score: {quality_score:.2f}/1.00",
-                details=self._get_quality_summary(),
+                details=dict(self._get_quality_summary(), parser="pyshark"),
                 recommendations=[
                     "Review and improve capture setup",
                     "Check monitor mode configuration",
@@ -745,9 +774,9 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         elif quality_score < 0.8:
             findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="Suboptimal Capture Quality",
+                title="Suboptimal Capture Quality (PyShark)",
                 description=f"Capture quality score: {quality_score:.2f}/1.00",
-                details=self._get_quality_summary(),
+                details=dict(self._get_quality_summary(), parser="pyshark"),
                 recommendations=[
                     "Some capture quality issues detected",
                     "Review specific findings for improvement areas",
@@ -758,9 +787,9 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
         else:
             findings.append(self.create_finding(
                 severity=Severity.INFO,
-                title="Good Capture Quality",
+                title="Good Capture Quality (PyShark)",
                 description=f"High capture quality score: {quality_score:.2f}/1.00",
-                details=self._get_quality_summary(),
+                details=dict(self._get_quality_summary(), parser="pyshark"),
                 recommendations=[
                     "Capture quality is suitable for comprehensive analysis",
                     "All major quality indicators are acceptable"
@@ -827,37 +856,33 @@ class CaptureQualityAnalyzer(BaseAnalyzer):
             "antenna_diversity": len(self.antenna_info)
         }
         
-    def _create_packet_signature(self, packet: Packet) -> str:
-        """Create a simple signature for duplicate detection."""
+    def _create_packet_signature(self, packet: PySharkPacket) -> str:
+        """Create a simple signature for duplicate detection using PyShark."""
         try:
-            if packet_has_layer(packet, Dot11):
-                dot11 = get_packet_layer(packet, "Dot11")
+            if hasattr(packet, 'wlan') and packet.wlan:
+                wlan = packet.wlan
                 # Simple signature based on key fields
                 sig_parts = [
-                    str(dot11.type),
-                    str(dot11.subtype),
-                    str(dot11.addr1) if hasattr(dot11, 'addr1') else "",
-                    str(dot11.addr2) if hasattr(dot11, 'addr2') else "",
-                    str(len(packet))
+                    str(getattr(wlan, 'fc_type', '')),
+                    str(getattr(wlan, 'fc_subtype', '')),
+                    str(getattr(wlan, 'da', '')),
+                    str(getattr(wlan, 'sa', '')),
+                    str(len(str(packet)))
                 ]
                 return "|".join(sig_parts)
         except:
             pass
-        return str(len(packet))
+        return str(len(str(packet)))
         
-    def _extract_timestamp(self, packet: Packet) -> float:
-        """Extract timestamp from packet."""
-        if hasattr(packet, 'time'):
-            try:
-                time_val = get_timestamp(packet)
-                if hasattr(time_val, '__float__'):
-                    return float(time_val)
-                elif hasattr(time_val, 'val'):
-                    return float(time_val.val)
-                else:
-                    return float(time_val)
-            except (ValueError, TypeError, AttributeError):
-                return 0.0
+    def _extract_timestamp(self, packet: PySharkPacket) -> float:
+        """Extract timestamp from packet using PyShark."""
+        try:
+            if hasattr(packet, 'sniff_timestamp'):
+                return float(packet.sniff_timestamp)
+            elif hasattr(packet, 'frame_info') and hasattr(packet.frame_info, 'time_epoch'):
+                return float(packet.frame_info.time_epoch)
+        except (ValueError, TypeError, AttributeError):
+            pass
         return 0.0
         
     def get_display_filters(self) -> List[str]:

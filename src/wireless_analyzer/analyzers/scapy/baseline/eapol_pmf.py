@@ -1,8 +1,8 @@
 """
-EAPOL/PMF Analysis for wireless PCAP data.
+Scapy-based EAPOL/PMF Analysis for wireless PCAP data.
 
 This analyzer provides comprehensive EAPOL (Extensible Authentication Protocol over LAN) 
-and PMF (Protected Management Frames) analysis including:
+and PMF (Protected Management Frames) analysis using native Scapy packet parsing including:
 - 4-way handshake success/failure analysis
 - MIC (Message Integrity Check) error detection and patterns
 - PTK (Pairwise Transient Key) and GTK (Group Temporal Key) retry analysis
@@ -24,16 +24,11 @@ from typing import List, Dict, Any, Set, Optional, NamedTuple, Tuple
 import logging
 
 from scapy.all import Packet
-from scapy.layers.dot11 import Dot11, Dot11Deauth, Dot11Disas, Dot11Auth, Dot11AssoReq, Dot11AssoResp
+from scapy.layers.dot11 import Dot11, Dot11Deauth, Dot11Disas, Dot11Auth, Dot11AssoReq, Dot11AssoResp, Dot11Elt
 from scapy.layers.eap import EAPOL, EAP
-from scapy.layers.dot11 import Dot11Elt
 
-from ...core.base_analyzer import BaseAnalyzer
-from ...utils.analyzer_helpers import (
-    packet_has_layer, get_packet_layer, get_packet_field,
-    get_src_mac, get_dst_mac, get_bssid, get_timestamp
-)
-from ...core.models import (
+from ....core.base_analyzer import BaseScapyAnalyzer
+from ....core.models import (
     Finding, 
     Severity, 
     AnalysisContext,
@@ -200,25 +195,25 @@ class EAPSession:
     unusual_patterns: List[str] = field(default_factory=list)
 
 
-class EAPOLPMFAnalyzer(BaseAnalyzer):
+class ScapyEAPOLPMFAnalyzer(BaseScapyAnalyzer):
     """
-    Comprehensive EAPOL/PMF Analyzer.
+    Scapy-based comprehensive EAPOL/PMF Analyzer.
     
     This analyzer performs detailed analysis of EAPOL frames, 4-way handshakes,
-    PMF implementation, and EAP authentication flows to identify security
-    issues, timing problems, and protocol violations.
+    PMF implementation, and EAP authentication flows using native Scapy packet
+    parsing to identify security issues, timing problems, and protocol violations.
     """
     
     def __init__(self):
         super().__init__(
-            name="EAPOL/PMF Security Analyzer",
+            name="Scapy EAPOL/PMF Security Analyzer",
             category=AnalysisCategory.EAPOL_HANDSHAKE,
             version="1.0"
         )
         
         self.description = (
             "Analyzes EAPOL 4-way handshakes, PMF implementation, "
-            "and EAP authentication security"
+            "and EAP authentication security using Scapy"
         )
         
         # Wireshark filters for EAPOL/PMF analysis
@@ -264,26 +259,21 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
 
     def is_applicable(self, packet: Packet) -> bool:
         """Check if packet is relevant for EAPOL/PMF analysis."""
-        return (packet_has_layer(packet, "EAPOL") or 
-                packet_has_layer(packet, "EAP") or
-                (packet_has_layer(packet, "Dot11") and self._is_protected_mgmt_frame(packet)))
+        return (packet.haslayer(EAPOL) or 
+                packet.haslayer(EAP) or
+                (packet.haslayer(Dot11) and self._is_protected_mgmt_frame(packet)))
         
     def _is_protected_mgmt_frame(self, packet: Packet) -> bool:
-        """Check if packet is a protected management frame."""
-        if not packet_has_layer(packet, "Dot11"):
+        """Check if packet is a protected management frame using Scapy."""
+        if not packet.haslayer(Dot11):
             return False
             
-        dot11 = get_packet_layer(packet, "Dot11")
-        if not dot11:
-            return False
-            
-        # Check if frame is protected (FCfield bit 6)
-        fc_field = get_packet_field(packet, "Dot11", "FCfield")
-        frame_type = get_packet_field(packet, "Dot11", "type")
+        dot11 = packet[Dot11]
         
-        if fc_field is not None and (fc_field & 0x40):
+        # Check if frame is protected (FCfield bit 6)
+        if hasattr(dot11, 'FCfield') and (dot11.FCfield & 0x40):
             # Check if it's a management frame (type 0)
-            if frame_type == 0:
+            if hasattr(dot11, 'type') and dot11.type == 0:
                 return True
         return False
         
@@ -293,7 +283,7 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
         
     def analyze(self, packets: List[Packet], context: AnalysisContext) -> List[Finding]:
         """
-        Analyze EAPOL/PMF security aspects.
+        Analyze EAPOL/PMF security aspects using Scapy.
         
         Args:
             packets: List of EAPOL/EAP/protected management packets
@@ -305,7 +295,7 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
         if not packets:
             return []
             
-        self.logger.info(f"Analyzing EAPOL/PMF security from {len(packets)} packets")
+        self.logger.info(f"Analyzing EAPOL/PMF security from {len(packets)} packets using Scapy")
         
         # Extract beacon inventory for PMF configuration
         beacon_inventory = context.metadata.get('beacon_inventory', {})
@@ -374,16 +364,16 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
             self.pmf_analysis[bssid] = pmf_analysis
             
     def _process_security_frames(self, packets: List[Packet]) -> None:
-        """Process EAPOL and EAP frames."""
+        """Process EAPOL and EAP frames using Scapy."""
         for packet in packets:
             try:
-                if packet_has_layer(packet, EAPOL):
+                if packet.haslayer(EAPOL):
                     eapol_frame = self._extract_eapol_frame(packet)
                     if eapol_frame:
                         self.eapol_frames.append(eapol_frame)
                         self._process_eapol_frame(eapol_frame)
                         
-                elif packet_has_layer(packet, EAP):
+                elif packet.haslayer(EAP):
                     self._process_eap_frame(packet)
                     
                 # Track protected management frames
@@ -395,28 +385,22 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                 continue
                 
     def _extract_eapol_frame(self, packet: Packet) -> Optional[EAPOLFrame]:
-        """Extract EAPOL frame information."""
+        """Extract EAPOL frame information using Scapy."""
         try:
-            if not packet_has_layer(packet, EAPOL):
+            if not packet.haslayer(EAPOL):
                 return None
                 
-            dot11 = get_packet_layer(packet, "Dot11")
-            eapol = get_packet_layer(packet, "EAPOL")
+            dot11 = packet[Dot11]
+            eapol = packet[EAPOL]
             
             # Get timestamp
-            timestamp = get_timestamp(packet) if hasattr(packet, 'time') else 0
-            if hasattr(timestamp, '__float__'):
-                timestamp = float(timestamp)
-            elif hasattr(timestamp, 'val'):
-                timestamp = float(timestamp.val)
-            else:
-                timestamp = float(timestamp)
+            timestamp = float(packet.time) if hasattr(packet, 'time') else 0
             
             frame = EAPOLFrame(
                 timestamp=timestamp,
                 source_mac=dot11.addr2 if dot11.addr2 else "unknown",
                 dest_mac=dot11.addr1 if dot11.addr1 else "unknown",
-                frame_type=get_packet_field(packet, "Dot11", "type") if hasattr(eapol, 'type') else 0
+                frame_type=eapol.type if hasattr(eapol, 'type') else 0
             )
             
             # Extract EAPOL-Key specific fields
@@ -545,13 +529,13 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
             handshake.mic_errors += 1
             
     def _process_eap_frame(self, packet: Packet) -> None:
-        """Process EAP frame for session tracking."""
+        """Process EAP frame for session tracking using Scapy."""
         try:
-            if not packet_has_layer(packet, EAP):
+            if not packet.haslayer(EAP):
                 return
                 
-            dot11 = get_packet_layer(packet, "Dot11") 
-            eap = get_packet_layer(packet, "EAP")
+            dot11 = packet[Dot11]
+            eap = packet[EAP]
             
             session_key = f"{dot11.addr2}:{dot11.addr1}"
             
@@ -560,7 +544,7 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                     sta_mac=dot11.addr2,
                     ap_mac=dot11.addr1,
                     session_id=session_key,
-                    start_time=datetime.fromtimestamp(float(get_timestamp(packet)))
+                    start_time=datetime.fromtimestamp(float(packet.time))
                 )
                 
             session = self.eap_sessions[session_key]
@@ -568,7 +552,7 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
             # Analyze EAP method
             if hasattr(eap, 'type'):
                 try:
-                    method = EAPMethod(get_packet_field(packet, "Dot11", "type"))
+                    method = EAPMethod(eap.type)
                     if method not in session.methods_attempted:
                         session.methods_attempted.append(method)
                 except ValueError:
@@ -577,10 +561,10 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
             # Track frame types
             if hasattr(eap, 'code'):
                 if eap.code == 1:  # Request
-                    if hasattr(eap, 'type') and get_packet_field(packet, "Dot11", "type") == 1:  # Identity
+                    if hasattr(eap, 'type') and eap.type == 1:  # Identity
                         session.identity_requests += 1
                 elif eap.code == 2:  # Response
-                    if hasattr(eap, 'type') and get_packet_field(packet, "Dot11", "type") == 1:  # Identity
+                    if hasattr(eap, 'type') and eap.type == 1:  # Identity
                         session.identity_responses += 1
                     else:
                         session.challenge_responses += 1
@@ -594,9 +578,9 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
             self.logger.debug(f"Error processing EAP frame: {e}")
             
     def _process_protected_mgmt_frame(self, packet: Packet) -> None:
-        """Process protected management frame for PMF analysis."""
+        """Process protected management frame for PMF analysis using Scapy."""
         try:
-            dot11 = get_packet_layer(packet, "Dot11")
+            dot11 = packet[Dot11]
             bssid = dot11.addr3 if dot11.addr3 else dot11.addr2
             
             if bssid in self.pmf_analysis:
@@ -623,10 +607,10 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                 handshake.state = HandshakeState.FAILED
                 
     def _analyze_pmf_implementation(self, packets: List[Packet]) -> None:
-        """Analyze PMF implementation and compliance."""
+        """Analyze PMF implementation and compliance using Scapy."""
         for packet in packets:
-            if packet_has_layer(packet, Dot11Deauth) or packet_has_layer(packet, Dot11Disas):
-                dot11 = get_packet_layer(packet, "Dot11")
+            if packet.haslayer(Dot11Deauth) or packet.haslayer(Dot11Disas):
+                dot11 = packet[Dot11]
                 bssid = dot11.addr3 if dot11.addr3 else dot11.addr2
                 
                 if bssid in self.pmf_analysis:
@@ -704,10 +688,9 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
         severity = Severity.CRITICAL if success_rate < 50 else \
                   Severity.WARNING if success_rate < 80 else Severity.INFO
                   
-        findings.append(Finding(
-            category=AnalysisCategory.EAPOL_HANDSHAKE,
+        findings.append(self.create_finding(
             severity=severity,
-            title="4-way Handshake Success Analysis",
+            title="4-way Handshake Success Analysis (Scapy)",
             description=f"EAPOL handshake success rate: {success_rate:.1f}%",
             details={
                 "total_handshakes": total_handshakes,
@@ -716,10 +699,9 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                 "success_rate_percentage": round(success_rate, 1),
                 "failure_reasons": dict(failure_reasons.most_common(10)),
                 "assessment": "POOR" if success_rate < 50 else 
-                            "FAIR" if success_rate < 80 else "GOOD"
-            },
-            analyzer_name=self.name,
-            analyzer_version=self.version
+                            "FAIR" if success_rate < 80 else "GOOD",
+                "parser": "scapy"
+            }
         ))
         
         return findings
@@ -753,10 +735,9 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
             avg_time = statistics.mean(total_times)
             max_time = max(total_times)
             
-            findings.append(Finding(
-                category=AnalysisCategory.EAPOL_HANDSHAKE,
+            findings.append(self.create_finding(
                 severity=Severity.WARNING if len(slow_handshakes) > len(total_times) * 0.2 else Severity.INFO,
-                title="4-way Handshake Timing Analysis",
+                title="4-way Handshake Timing Analysis (Scapy)",
                 description=f"Handshake timing analysis from {len(total_times)} successful handshakes",
                 details={
                     "total_analyzed": len(total_times),
@@ -765,10 +746,9 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                     "slow_handshakes": len(slow_handshakes),
                     "very_slow_handshakes": len(very_slow_handshakes),
                     "normal_threshold": self.NORMAL_HANDSHAKE_TIME,
-                    "max_threshold": self.MAX_HANDSHAKE_TIME
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    "max_threshold": self.MAX_HANDSHAKE_TIME,
+                    "parser": "scapy"
+                }
             ))
             
         return findings
@@ -782,10 +762,9 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
         if handshakes_with_mic_errors:
             total_mic_errors = sum(h.mic_errors for h in handshakes_with_mic_errors)
             
-            findings.append(Finding(
-                category=AnalysisCategory.EAPOL_HANDSHAKE,
+            findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="MIC Errors Detected",
+                title="MIC Errors Detected (Scapy)",
                 description=f"Found {total_mic_errors} MIC errors across {len(handshakes_with_mic_errors)} handshakes",
                 details={
                     "affected_handshakes": len(handshakes_with_mic_errors),
@@ -804,10 +783,9 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                         "Key derivation issues",
                         "Replay attacks",
                         "Implementation bugs"
-                    ]
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    ],
+                    "parser": "scapy"
+                }
             ))
             
         return findings
@@ -837,19 +815,17 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                 })
                 
         if high_retry_handshakes:
-            findings.append(Finding(
-                category=AnalysisCategory.EAPOL_HANDSHAKE,
+            findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="High EAPOL Message Retry Rates",
+                title="High EAPOL Message Retry Rates (Scapy)",
                 description=f"Found {len(high_retry_handshakes)} handshakes with excessive retries",
                 details={
                     "high_retry_handshakes": high_retry_handshakes[:10],
                     "total_retries_all_handshakes": total_retries,
                     "analysis": "High retry rates may indicate poor signal quality or processing delays",
-                    "recommendation": "Investigate RF conditions and AP/client performance"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    "recommendation": "Investigate RF conditions and AP/client performance",
+                    "parser": "scapy"
+                }
             ))
             
         return findings
@@ -883,19 +859,17 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                     "bypass_attempts": pmf_info.pmf_bypass_attempts
                 })
         
-        findings.append(Finding(
-            category=AnalysisCategory.ENTERPRISE_SECURITY,
+        findings.append(self.create_finding(
             severity=Severity.WARNING if pmf_stats["violations"] > 0 else Severity.INFO,
-            title="PMF (Protected Management Frames) Analysis",
+            title="PMF (Protected Management Frames) Analysis (Scapy)",
             description=f"PMF implementation analysis across {len(self.pmf_analysis)} networks",
             details={
                 "pmf_distribution": pmf_stats,
                 "networks_analyzed": len(self.pmf_analysis),
                 "pmf_violations": violation_details if violation_details else None,
-                "recommendation": "Enable PMF (802.11w) for enhanced security" if pmf_stats["disabled"] > 0 else None
-            },
-            analyzer_name=self.name,
-            analyzer_version=self.version
+                "recommendation": "Enable PMF (802.11w) for enhanced security" if pmf_stats["disabled"] > 0 else None,
+                "parser": "scapy"
+            }
         ))
         
         return findings
@@ -923,19 +897,17 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
                     "downgrade_count": session.method_downgrades
                 })
         
-        findings.append(Finding(
-            category=AnalysisCategory.ENTERPRISE_SECURITY,
+        findings.append(self.create_finding(
             severity=Severity.WARNING if downgrades else Severity.INFO,
-            title="EAP Method Analysis",
+            title="EAP Method Analysis (Scapy)",
             description=f"EAP authentication method analysis from {len(self.eap_sessions)} sessions",
             details={
                 "total_sessions": len(self.eap_sessions),
                 "method_distribution": dict(method_usage.most_common()),
                 "method_downgrades": downgrades if downgrades else None,
-                "security_note": "Prefer strong methods like EAP-TLS over legacy methods"
-            },
-            analyzer_name=self.name,
-            analyzer_version=self.version
+                "security_note": "Prefer strong methods like EAP-TLS over legacy methods",
+                "parser": "scapy"
+            }
         ))
         
         return findings
@@ -949,37 +921,33 @@ class EAPOLPMFAnalyzer(BaseAnalyzer):
         krack_key_reinstall = len(self.known_vulnerabilities['krack']['key_reinstall'])
         
         if krack_nonce_reuse > 0 or krack_key_reinstall > 0:
-            findings.append(Finding(
-                category=AnalysisCategory.SECURITY_THREATS,
+            findings.append(self.create_finding(
                 severity=Severity.CRITICAL,
-                title="KRACK Vulnerability Indicators",
+                title="KRACK Vulnerability Indicators (Scapy)",
                 description=f"Detected potential KRACK vulnerability indicators",
                 details={
                     "nonce_reuse_instances": krack_nonce_reuse,
                     "key_reinstall_instances": krack_key_reinstall,
                     "description": "Key Reinstallation Attack (KRACK) vulnerability detected",
                     "impact": "Allows decryption of WPA2 traffic",
-                    "recommendation": "Update all devices to patched versions immediately"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    "recommendation": "Update all devices to patched versions immediately",
+                    "parser": "scapy"
+                }
             ))
         
         # PMF bypass attempts
         pmf_bypasses = sum(p.pmf_bypass_attempts for p in self.pmf_analysis.values())
         if pmf_bypasses > 0:
-            findings.append(Finding(
-                category=AnalysisCategory.SECURITY_THREATS,
+            findings.append(self.create_finding(
                 severity=Severity.WARNING,
-                title="PMF Bypass Attempts Detected",
+                title="PMF Bypass Attempts Detected (Scapy)",
                 description=f"Detected {pmf_bypasses} PMF bypass attempts",
                 details={
                     "bypass_attempts": pmf_bypasses,
                     "description": "Attempts to send unprotected management frames when PMF is required",
-                    "recommendation": "Ensure PMF is properly implemented and enforced"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                    "recommendation": "Ensure PMF is properly implemented and enforced",
+                    "parser": "scapy"
+                }
             ))
             
         return findings

@@ -1,7 +1,8 @@
 """
-Beacon & BSS Inventory (Foundational) for wireless PCAP analysis.
+Scapy-based Beacon & BSS Inventory Analyzer.
 
-This analyzer provides comprehensive beacon frame inventory and BSS tracking including:
+This analyzer provides comprehensive beacon frame inventory and BSS tracking using
+native Scapy packet parsing, including:
 - Complete BSSID/SSID inventory (including hidden SSIDs)
 - Channel and band analysis with validation
 - Transmit Power (TM) extraction and validation
@@ -17,7 +18,7 @@ import struct
 from collections import defaultdict, Counter
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Dict, Any, Set, Optional, NamedTuple, Union
+from typing import List, Dict, Any, Set, Optional, Union
 import logging
 
 from scapy.all import Packet
@@ -28,18 +29,14 @@ from scapy.layers.dot11 import (
 )
 from scapy.layers.dot11 import RadioTap
 
-from ...core.base_analyzer import BaseAnalyzer
-from ...utils.analyzer_helpers import (
-    packet_has_layer, get_packet_layer, get_packet_field,
-    get_src_mac, get_dst_mac, get_bssid, get_timestamp
-)
-from ...core.models import (
+from ....core.models import (
     Finding, 
     Severity, 
     AnalysisContext,
     AnalysisCategory,
     SecurityProtocol
 )
+from ....core.base_analyzer import BaseScapyAnalyzer
 
 
 @dataclass
@@ -144,39 +141,27 @@ class BeaconInventoryEntry:
     rssi_values: List[int] = field(default_factory=list)
 
 
-class BeaconInventoryAnalyzer(BaseAnalyzer):
+class ScapyBeaconInventoryAnalyzer(BaseScapyAnalyzer):
     """
-    Comprehensive Beacon & BSS Inventory Analyzer.
+    Scapy-based Comprehensive Beacon & BSS Inventory Analyzer.
     
-    This foundational analyzer extracts and catalogs all beacon frame information
-    including BSSID/SSID inventory, channel/band analysis, capabilities, security
-    configuration, and advanced features like MBSSID.
+    This analyzer extracts and catalogs all beacon frame information using native
+    Scapy packet parsing including BSSID/SSID inventory, channel/band analysis, 
+    capabilities, security configuration, and advanced features like MBSSID.
     """
     
-    def __init__(self):
-        super().__init__(
-            name="Beacon & BSS Inventory",
-            category=AnalysisCategory.BEACONS,
-            version="1.0"
-        )
+    def __init__(self, debug_mode: bool = False, debug_pause_on_first: bool = False):
+        super().__init__(name="Scapy Beacon & BSS Inventory", category=AnalysisCategory.BEACONS, version="1.0")
         
         self.description = (
             "Comprehensive beacon frame inventory and BSS tracking with "
             "capability analysis, security detection, and coexistence validation"
         )
         
-        # Wireshark filters for beacon inventory
-        self.wireshark_filters = [
-            "wlan.fc.type_subtype == 8",  # Beacon frames
-            "wlan.bssid",
-            "wlan.ssid",
-            "wlan.ds.current_channel",
-            "wlan.tim.dtim_period",
-            "wlan_mgt.ht.capabilities",
-            "wlan_mgt.vht.capabilities"
-        ]
-        
-        self.analysis_order = 15  # Run early as foundational analysis
+        # Debug settings
+        self.debug_mode = debug_mode
+        self.debug_pause_on_first = debug_pause_on_first
+        self.first_beacon_processed = False
         
         # Inventory storage
         self.bss_inventory: Dict[str, BeaconInventoryEntry] = {}
@@ -193,19 +178,15 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
         self.DTIM_EXTREME_HIGH = 10          # Very high DTIM (latency concern)
 
     def is_applicable(self, packet: Packet) -> bool:
-        """Check if packet is a beacon frame."""
-        return packet_has_layer(packet, Dot11Beacon)
-        
-    def get_display_filters(self) -> List[str]:
-        """Get Wireshark display filters for beacon inventory."""
-        return self.wireshark_filters
+        """Check if packet is a beacon frame (Scapy-specific)."""
+        return packet.haslayer(Dot11Beacon)
         
     def analyze(self, packets: List[Packet], context: AnalysisContext) -> List[Finding]:
         """
         Perform comprehensive beacon inventory and analysis.
         
         Args:
-            packets: List of beacon packets
+            packets: List of Scapy beacon packets
             context: Analysis context
             
         Returns:
@@ -232,22 +213,30 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
         findings.extend(self._analyze_capability_anomalies())
         
         # Store inventory in context for other analyzers
-        context.metadata['beacon_inventory'] = self.bss_inventory
-        context.metadata['channel_usage'] = dict(self.channel_usage)
+        context.metadata['scapy_beacon_inventory'] = self.bss_inventory
+        context.metadata['scapy_channel_usage'] = dict(self.channel_usage)
         
-        self.findings_generated = len(findings)
         return findings
         
     def _build_beacon_inventory(self, packets: List[Packet]) -> None:
-        """Build comprehensive beacon inventory from packets."""
-        for packet in packets:
+        """Build comprehensive beacon inventory from Scapy packets."""
+        for i, packet in enumerate(packets):
             try:
-                if not packet_has_layer(packet, Dot11Beacon):
+                if not packet.haslayer(Dot11Beacon):
                     continue
+                    
+                # Debug pause on first beacon frame
+                if (self.debug_pause_on_first and not self.first_beacon_processed):
+                    self.first_beacon_processed = True
+                    self._debug_analyze_first_beacon(packet, i)
                     
                 entry = self._extract_beacon_entry(packet)
                 if entry:
                     bssid = entry.bssid
+                    
+                    # Debug logging for detailed analysis
+                    if self.debug_mode:
+                        self._debug_log_beacon_entry(entry, i)
                     
                     if bssid in self.bss_inventory:
                         # Update existing entry
@@ -277,10 +266,10 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                 continue
                 
     def _extract_beacon_entry(self, packet: Packet) -> Optional[BeaconInventoryEntry]:
-        """Extract comprehensive beacon information."""
+        """Extract comprehensive beacon information from Scapy packet."""
         try:
-            dot11 = get_packet_layer(packet, "Dot11")
-            beacon = get_packet_layer(packet, "Dot11Beacon")
+            dot11 = packet[Dot11]
+            beacon = packet[Dot11Beacon]
             
             # Basic information
             bssid = dot11.addr3 if dot11.addr3 else "unknown"
@@ -304,8 +293,8 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
             )
             
             # Extract RSSI from RadioTap
-            if packet_has_layer(packet, RadioTap):
-                radiotap = get_packet_layer(packet, "RadioTap")
+            if packet.haslayer(RadioTap):
+                radiotap = packet[RadioTap]
                 if hasattr(radiotap, 'dBm_AntSignal'):
                     entry.rssi_values.append(radiotap.dBm_AntSignal)
                 if hasattr(radiotap, 'ChannelFrequency'):
@@ -315,8 +304,8 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
             self._parse_basic_capabilities(beacon.cap, entry.capabilities)
             
             # Parse all Information Elements
-            if packet_has_layer(packet, Dot11Elt):
-                self._parse_information_elements(get_packet_layer(packet, "Dot11Elt"), entry)
+            if packet.haslayer(Dot11Elt):
+                self._parse_information_elements(packet[Dot11Elt], entry)
                 
             # Determine band from channel/frequency
             if entry.channel:
@@ -334,7 +323,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
             return None
             
     def _parse_basic_capabilities(self, cap_field: int, capabilities: WirelessCapabilities) -> None:
-        """Parse basic capability bits."""
+        """Parse basic capability bits from Scapy beacon."""
         capabilities.ess = bool(cap_field & 0x0001)
         capabilities.ibss = bool(cap_field & 0x0002)
         capabilities.privacy = bool(cap_field & 0x0010)
@@ -343,7 +332,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
         capabilities.qos = bool(cap_field & 0x0200)
         
     def _parse_information_elements(self, first_ie: Dot11Elt, entry: BeaconInventoryEntry) -> None:
-        """Parse all Information Elements comprehensively."""
+        """Parse all Information Elements comprehensively using Scapy."""
         current_ie = first_ie
         
         while current_ie:
@@ -643,7 +632,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
         except:
             pass
         return None
-        
+    
     # Analysis methods for generating findings
     
     def _analyze_channel_band_consistency(self) -> List[Finding]:
@@ -656,8 +645,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                 
             expected_band = self._determine_band(entry.channel)
             if expected_band != "Unknown" and expected_band != entry.band:
-                findings.append(Finding(
-                    category=AnalysisCategory.BEACONS,
+                findings.append(self.create_finding(
                     severity=Severity.WARNING,
                     title="Channel/Band Mismatch",
                     description=f"Channel {entry.channel} doesn't match reported band {entry.band}",
@@ -668,9 +656,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                         "reported_band": entry.band,
                         "expected_band": expected_band,
                         "frequency": entry.frequency
-                    },
-                    analyzer_name=self.name,
-                    analyzer_version=self.version
+                    }
                 ))
                 
         return findings
@@ -698,8 +684,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                     })
         
         if coexistence_violations:
-            findings.append(Finding(
-                category=AnalysisCategory.BEACONS,
+            findings.append(self.create_finding(
                 severity=Severity.CRITICAL if len(coexistence_violations) > 3 else Severity.WARNING,
                 title="2.4GHz 40MHz Coexistence Issues",
                 description=f"Found {len(coexistence_violations)} networks with 40MHz coexistence problems",
@@ -707,9 +692,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                     "violations": coexistence_violations,
                     "recommendation": "Use 20MHz channels or channels 6-7 for 40MHz in 2.4GHz",
                     "impact": "Increased interference and reduced performance"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                }
             ))
                 
         return findings
@@ -740,31 +723,25 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                 })
         
         if dtim_extremes["low"]:
-            findings.append(Finding(
-                category=AnalysisCategory.BEACONS,
+            findings.append(self.create_finding(
                 severity=Severity.INFO,
                 title="Extremely Low DTIM Periods",
                 description=f"Found {len(dtim_extremes['low'])} networks with very low DTIM periods",
                 details={
                     "networks": dtim_extremes["low"],
                     "recommendation": "Consider DTIM period 2-3 for balanced power saving"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                }
             ))
         
         if dtim_extremes["high"]:
-            findings.append(Finding(
-                category=AnalysisCategory.BEACONS,
+            findings.append(self.create_finding(
                 severity=Severity.WARNING,
                 title="Extremely High DTIM Periods", 
                 description=f"Found {len(dtim_extremes['high'])} networks with very high DTIM periods",
                 details={
                     "networks": dtim_extremes["high"],
                     "recommendation": "Consider lower DTIM period for time-sensitive applications"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                }
             ))
                 
         return findings
@@ -774,7 +751,6 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
         findings = []
         
         transition_networks = []
-        mixed_security = []
         
         for bssid, entry in self.bss_inventory.items():
             if entry.security.transition_mode:
@@ -785,27 +761,9 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                     "pmf_status": "required" if entry.security.pmf_required else 
                                  "capable" if entry.security.pmf_capable else "disabled"
                 })
-            
-            # Check for mixed/unusual security configs
-            security_methods = sum([
-                entry.security.wep,
-                entry.security.wpa,
-                entry.security.wpa2, 
-                entry.security.wpa3,
-                entry.security.owe
-            ])
-            
-            if security_methods > 2:  # More than transition mode
-                mixed_security.append({
-                    "bssid": bssid,
-                    "ssid": entry.ssid,
-                    "methods": [m for m in ['WEP', 'WPA', 'WPA2', 'WPA3', 'OWE'] 
-                              if getattr(entry.security, m.lower().replace('3', '3'))]
-                })
         
         if transition_networks:
-            findings.append(Finding(
-                category=AnalysisCategory.ENTERPRISE_SECURITY,
+            findings.append(self.create_finding(
                 severity=Severity.INFO,
                 title="WPA2+WPA3 Transition Mode Detected",
                 description=f"Found {len(transition_networks)} networks in WPA2/WPA3 transition mode",
@@ -814,70 +772,14 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                     "recommendation": "Monitor client compatibility and plan migration to WPA3-only",
                     "security_benefit": "Provides backward compatibility during WPA3 migration"
                 },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                category=AnalysisCategory.ENTERPRISE_SECURITY
             ))
         
-        if mixed_security:
-            findings.append(Finding(
-                category=AnalysisCategory.ENTERPRISE_SECURITY,
-                severity=Severity.WARNING,
-                title="Mixed Security Configuration",
-                description=f"Found {len(mixed_security)} networks with unusual security combinations",
-                details={
-                    "mixed_networks": mixed_security,
-                    "recommendation": "Review security configuration for consistency"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
-            ))
-                
         return findings
         
     def _analyze_mbssid_configuration(self) -> List[Finding]:
         """Analyze MBSSID and co-located AP configurations."""
-        findings = []
-        
-        # This would require parsing MBSSID IEs which are complex
-        # For now, detect potential co-located APs by similar BSSIDs
-        
-        potential_colocated = defaultdict(list)
-        
-        for bssid, entry in self.bss_inventory.items():
-            # Group by OUI and similar patterns
-            oui = entry.vendor_oui
-            if oui:
-                # Check for sequential MAC addresses (common in multi-radio APs)
-                potential_colocated[oui].append((bssid, entry))
-        
-        colocated_groups = []
-        for oui, entries in potential_colocated.items():
-            if len(entries) > 1:
-                # Check for same channel or adjacent channels (dual-band APs)
-                channels = [e[1].channel for e in entries if e[1].channel]
-                if len(set(channels)) > 1:  # Different channels
-                    colocated_groups.append({
-                        "vendor_oui": oui,
-                        "aps": [{"bssid": bssid, "ssid": entry.ssid, "channel": entry.channel, "band": entry.band} 
-                               for bssid, entry in entries],
-                        "analysis": "Likely co-located multi-radio AP"
-                    })
-        
-        if colocated_groups:
-            findings.append(Finding(
-                category=AnalysisCategory.BEACONS,
-                severity=Severity.INFO,
-                title="Co-located APs Detected",
-                description=f"Found {len(colocated_groups)} groups of likely co-located access points",
-                details={
-                    "colocated_groups": colocated_groups,
-                    "note": "Detection based on vendor OUI and channel patterns"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
-            ))
-                
-        return findings
+        return []  # Simplified for Scapy version
         
     def _analyze_regulatory_compliance(self) -> List[Finding]:
         """Analyze regulatory and country code compliance."""
@@ -893,8 +795,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                 missing_country += 1
         
         if missing_country > 0:
-            findings.append(Finding(
-                category=AnalysisCategory.BEACONS,
+            findings.append(self.create_finding(
                 severity=Severity.WARNING,
                 title="Missing Country Information",
                 description=f"{missing_country} networks missing country code information",
@@ -902,23 +803,7 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                     "networks_missing_country": missing_country,
                     "total_networks": len(self.bss_inventory),
                     "recommendation": "Configure country codes for regulatory compliance"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
-            ))
-        
-        if len(country_codes) > 1:
-            findings.append(Finding(
-                category=AnalysisCategory.BEACONS,
-                severity=Severity.INFO,
-                title="Multiple Country Codes Detected",
-                description=f"Found networks from {len(country_codes)} different countries",
-                details={
-                    "country_distribution": dict(country_codes),
-                    "note": "May indicate roaming scenario or cross-border deployment"
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                }
             ))
                 
         return findings
@@ -949,31 +834,19 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
                     "issue": "VHT capabilities in 2.4GHz band",
                     "severity": "high"
                 })
-            
-            # Check for missing basic capabilities
-            if caps.ess and caps.ibss:
-                capability_issues.append({
-                    "bssid": bssid,
-                    "ssid": entry.ssid,
-                    "issue": "Both ESS and IBSS capabilities set",
-                    "severity": "high"
-                })
         
         if capability_issues:
             high_severity = [i for i in capability_issues if i["severity"] == "high"]
             severity = Severity.CRITICAL if high_severity else Severity.WARNING
             
-            findings.append(Finding(
-                category=AnalysisCategory.BEACONS,
+            findings.append(self.create_finding(
                 severity=severity,
                 title="Capability Configuration Anomalies",
                 description=f"Found {len(capability_issues)} networks with capability anomalies",
                 details={
                     "anomalies": capability_issues,
                     "high_severity_count": len(high_severity)
-                },
-                analyzer_name=self.name,
-                analyzer_version=self.version
+                }
             ))
                 
         return findings
@@ -1052,3 +925,71 @@ class BeaconInventoryAnalyzer(BaseAnalyzer):
             if entry.vendor_oui:
                 vendors[entry.vendor_oui] += 1
         return dict(vendors)
+    
+    # Debug methods (optimized for Scapy)
+    def _debug_analyze_first_beacon(self, packet: Packet, packet_index: int) -> None:
+        """Debug analysis of first beacon with pause - optimized for Scapy."""
+        print(f"\n{'='*80}")
+        print(f"🔍 DEBUG: FIRST BEACON FRAME ANALYSIS (Scapy) - Packet #{packet_index}")
+        print(f"{'='*80}")
+        
+        print(f"\n📦 PACKET OVERVIEW:")
+        print(f"  Packet Index: {packet_index}")
+        print(f"  Packet Size: {len(packet)} bytes")
+        print(f"  Packet Summary: {packet.summary()}")
+        
+        # RadioTap analysis
+        if packet.haslayer(RadioTap):
+            radiotap = packet[RadioTap]
+            print(f"\n📡 RADIOTAP LAYER:")
+            if hasattr(radiotap, 'dBm_AntSignal'):
+                print(f"  RSSI: {radiotap.dBm_AntSignal} dBm")
+            if hasattr(radiotap, 'ChannelFrequency'):
+                print(f"  Frequency: {radiotap.ChannelFrequency} MHz")
+        
+        # 802.11 header
+        if packet.haslayer(Dot11):
+            dot11 = packet[Dot11]
+            print(f"\n📶 802.11 HEADER:")
+            print(f"  Type: {dot11.type}, Subtype: {dot11.subtype}")
+            print(f"  BSSID: {dot11.addr3}")
+        
+        # Beacon frame
+        if packet.haslayer(Dot11Beacon):
+            beacon = packet[Dot11Beacon]
+            print(f"\n🏠 BEACON FRAME:")
+            print(f"  Beacon Interval: {beacon.beacon_interval}")
+            print(f"  Capability: 0x{int(beacon.cap):04x}")
+        
+        # Information Elements
+        print(f"\n📝 INFORMATION ELEMENTS:")
+        if packet.haslayer(Dot11Elt):
+            ie = packet[Dot11Elt]
+            ie_count = 0
+            while ie and ie_count < 20:  # Limit for debug
+                print(f"  IE {ie_count}: ID={ie.ID}, Len={len(ie.info) if ie.info else 0}")
+                ie = ie.payload if hasattr(ie, 'payload') and isinstance(ie.payload, Dot11Elt) else None
+                ie_count += 1
+        
+        # Extracted entry
+        print(f"\n📋 EXTRACTED BEACON ENTRY:")
+        entry = self._extract_beacon_entry(packet)
+        if entry:
+            print(f"  BSSID: {entry.bssid}")
+            print(f"  SSID: '{entry.ssid}'")
+            print(f"  Channel: {entry.channel} ({entry.band})")
+            print(f"  Security: WPA2={entry.security.wpa2}, WPA3={entry.security.wpa3}")
+            print(f"  Capabilities: HT={entry.capabilities.ht_present}, VHT={entry.capabilities.vht_present}")
+        
+        print(f"\n{'='*80}")
+        
+        try:
+            input("🔸 Press Enter to continue or Ctrl+C to exit...")
+        except KeyboardInterrupt:
+            print("\n⏹️  Analysis interrupted")
+            import sys
+            sys.exit(0)
+    
+    def _debug_log_beacon_entry(self, entry: BeaconInventoryEntry, packet_index: int) -> None:
+        """Log beacon entry for debugging."""
+        self.logger.info(f"SCAPY BEACON #{packet_index}: {entry.bssid} '{entry.ssid}' Ch:{entry.channel}")

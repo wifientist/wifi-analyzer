@@ -120,9 +120,21 @@ class Finding:
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert finding to dictionary for serialization."""
+        # Safely extract category value
+        try:
+            category_value = self.category.value if hasattr(self.category, 'value') else str(self.category)
+        except AttributeError:
+            category_value = str(self.category)
+        
+        # Safely extract severity value
+        try:
+            severity_value = self.severity.value if hasattr(self.severity, 'value') else str(self.severity)
+        except AttributeError:
+            severity_value = str(self.severity)
+        
         return {
-            'category': self.category.value,
-            'severity': self.severity.value,
+            'category': category_value,
+            'severity': severity_value,
             'title': self.title,
             'description': self.description,
             'timestamp': self.timestamp.isoformat(),
@@ -144,7 +156,7 @@ class Finding:
             'frequency': self.frequency,
             'rssi': self.rssi,
             'data_rate': self.data_rate,
-            'frame_types_involved': [ft.value for ft in self.frame_types_involved],
+            'frame_types_involved': [ft.value if hasattr(ft, 'value') else str(ft) for ft in self.frame_types_involved],
             'analyzer_name': self.analyzer_name,
             'analyzer_version': self.analyzer_version,
             'confidence': self.confidence
